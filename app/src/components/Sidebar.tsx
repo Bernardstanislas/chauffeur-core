@@ -42,6 +42,7 @@ import {
   type DropPlace,
   dropPlace,
   foldedIndicator,
+  reviewIndicator,
   headingDropPlace,
   sectionDropBefore,
   shownRows,
@@ -666,9 +667,12 @@ function SectionHeading({
           </span>
         )}
         {routines && <FindRoutinesButton />}
-        <span className="shrink-0 text-[10.5px] font-normal tabular-nums normal-case" data-testid="section-count">
-          {rows.length}
-        </span>
+        {/* The reviews' section lists none: its count would always read 0. */}
+        {!section.reviews && (
+          <span className="shrink-0 text-[10.5px] font-normal tabular-nums normal-case" data-testid="section-count">
+            {rows.length}
+          </span>
+        )}
       </div>
       {menu && (
         <ContextMenu
@@ -1291,8 +1295,12 @@ function RowBadge({ workspace }: { workspace: WorkspaceInfo }) {
 }
 
 function ReviewsEntry({selected}: {selected: boolean}) {
+  const workspaces = useApp(useShallow((s) => s.workspaces));
+  const { working, needsInput } = useMemo(() => reviewIndicator(workspaces), [workspaces]);
   return <button type="button" onClick={showReviews} data-testid="reviews-entry" aria-current={selected ? "page" : undefined}
     className={cx("my-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-hover", selected ? "bg-hover text-accent" : "text-muted")}>
     <ClipboardCheck size={13} /> Reviews
+    {needsInput ? <span title="A review needs you" className="ml-auto h-2 w-2 rounded-full bg-attention" />
+      : working ? <span title="A review is running" className="ml-auto text-working"><Spinner size={11} /></span> : null}
   </button>;
 }
