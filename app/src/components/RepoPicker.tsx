@@ -1,6 +1,6 @@
 import type { RepoInfo } from "@chauffeur/protocol";
-import { Check, Folder, GitBranch, Loader2, Lock, RefreshCw, Search } from "lucide-react";
-import type { ReactNode, RefObject } from "react";
+import { Check, Folder, GitBranch, Loader2, Lock, Plus, RefreshCw, Search } from "lucide-react";
+import { type ReactNode, type RefObject, useState } from "react";
 import { relativeTime } from "@/lib/format";
 import { openExternal } from "@/lib/native";
 import {
@@ -10,6 +10,8 @@ import {
   shortAge,
   showsOwner,
 } from "@/lib/repoPicker";
+import { suggestedRepoName } from "@/lib/newRepo";
+import { NewRepoForm } from "./NewRepoForm";
 import { Button, cx, Kbd, Popover } from "./ui";
 import { useRepoPicker } from "./useRepoPicker";
 
@@ -19,8 +21,8 @@ const WIDTH = 470;
  * The creation dialog's repo picker, opened from its "Add repo" button: a search, a filter per
  * GitHub owner, then the chosen repos, Recent, each owner's repos and the clones only found on
  * this Mac. ↑↓ move the ring, ↵ adds or removes, ⌫ in an empty search removes the last; a pasted
- * GitHub URL is offered as a repo of its own. Says when GitHub last listed the repos, and why it
- * could not.
+ * GitHub URL is offered as a repo of its own, and a repo can be created on GitHub, named from the
+ * search. Says when GitHub last listed the repos, and why it could not.
  */
 export function RepoPopover({
   anchor,
@@ -38,6 +40,25 @@ export function RepoPopover({
   const { repos, query, offered, sections, options, owners, unknown } = view;
   const { listRef, active, onHover } = navigation;
   const { catalogError, githubError, refreshedAt } = status;
+  /** The name the "New repository" view opens with; null while the list shows. */
+  const [creating, setCreating] = useState<string | null>(null);
+  const suggestion = suggestedRepoName(filter);
+  const offerCreate = !!suggestion && !offered && !repos.some((repo) => repo.name.toLowerCase() === suggestion.toLowerCase());
+
+  if (creating !== null) {
+    return (
+      <Popover anchor={anchor} width={WIDTH} height={420} onClose={onClose} testId="repo-popover">
+        <NewRepoForm
+          initialName={creating}
+          onCancel={() => setCreating(null)}
+          onCreated={(repo) => {
+            setCreating(null);
+            pick(repo.key);
+          }}
+        />
+      </Popover>
+    );
+  }
 
   return (
     <Popover anchor={anchor} width={WIDTH} height={420} onClose={onClose} testId="repo-popover">
@@ -56,6 +77,9 @@ export function RepoPopover({
         />
         <button type="button" title="Refresh from GitHub" aria-label="Refresh from GitHub" disabled={status.refreshDisabled} className="shrink-0 text-faint hover:text-fg disabled:opacity-40" onClick={pages.refresh}>
           <RefreshCw size={12} className={pages.loading ? "animate-spin" : ""} />
+        </button>
+        <button type="button" title="New repository on GitHub" aria-label="New repository on GitHub" className="shrink-0 text-faint hover:text-fg" onClick={() => setCreating(suggestion)} data-testid="new-repo">
+          <Plus size={13} />
         </button>
       </div>
 
@@ -186,6 +210,21 @@ export function RepoPopover({
             <GitBranch size={11} /> {key} <span className="text-faint">(from a ticket)</span>
           </div>
         ))}
+        {offerCreate && (
+          <button
+            type="button"
+            className="mt-0.5 flex h-7 w-full min-w-0 items-center gap-2 rounded-[5px] px-2 text-left text-[12.5px] text-muted hover:bg-hover hover:text-fg"
+            onClick={() => setCreating(suggestion)}
+            data-testid="create-repo-from-search"
+          >
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border border-dashed border-line-strong">
+              <Plus size={10} />
+            </span>
+            <span className="min-w-0 truncate">
+              Create <b className="font-medium text-fg">{suggestion}</b> on GitHub…
+            </span>
+          </button>
+        )}
         {pages.nextCursor && (
           <div className="flex justify-center py-2">
             <Button size="sm" onClick={pages.loadMore} busy={pages.loading} disabled={!!pages.error} data-testid="repos-load-more">Load more repos</Button>

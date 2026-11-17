@@ -94,6 +94,7 @@ import type { ContextUsageParams } from "./ContextUsageParams";
 import type { ContextUsageResult } from "./ContextUsageResult";
 import type { CreateChatParams } from "./CreateChatParams";
 import type { CreatePrParams } from "./CreatePrParams";
+import type { CreateRepoParams } from "./CreateRepoParams";
 import type { CreateSectionParams } from "./CreateSectionParams";
 import type { CreateWorkspaceParams } from "./CreateWorkspaceParams";
 import type { CreateWorkspaceResult } from "./CreateWorkspaceResult";
@@ -256,6 +257,7 @@ import type { RenameChatParams } from "./RenameChatParams";
 import type { RenameSectionParams } from "./RenameSectionParams";
 import type { RenameTerminalParams } from "./RenameTerminalParams";
 import type { RenameWorkspaceParams } from "./RenameWorkspaceParams";
+import type { RepoInfo } from "./RepoInfo";
 import type { ReposListParams } from "./ReposListParams";
 import type { ReposListResult } from "./ReposListResult";
 import type { ReposPageParams } from "./ReposPageParams";
@@ -372,7 +374,7 @@ import type { WorktreeCreateParams } from "./WorktreeCreateParams";
 import type { WorktreeCreateResult } from "./WorktreeCreateResult";
 import type { WorktreeRemoveParams } from "./WorktreeRemoveParams";
 
-export const PROTOCOL_VERSION = 19;
+export const PROTOCOL_VERSION = 20;
 export const MIN_PROTOCOL_VERSION = 1;
 export const PEER_PROTOCOL_VERSION = 3;
 
@@ -448,6 +450,7 @@ export type ClientMethods = {
   "repos.list": [ReposListParams, ReposListResult];
   "repos.cached": [ReposListParams, ReposListResult];
   "repos.page": [ReposPageParams, ReposPageResult];
+  "repos.create": [CreateRepoParams, RepoInfo];
   "workspace.create": [CreateWorkspaceParams, CreateWorkspaceResult];
   "workspace.list": [ListWorkspacesParams, WorkspacesResult];
   "workspace.search_archived": [SearchArchivedParams, ArchivedSearchResult];
@@ -844,6 +847,7 @@ export const METHOD_NAMES = [
   "repos.list",
   "repos.cached",
   "repos.page",
+  "repos.create",
   "workspace.create",
   "workspace.list",
   "workspace.search_archived",

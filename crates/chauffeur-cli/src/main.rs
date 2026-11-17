@@ -21,7 +21,7 @@ use anyhow::Context;
 use chauffeur_protocol::client::*;
 use chauffeur_protocol::model::{
     AccountStatus, AgentKind, BriefState, ChatInfo, ChatKind, DesignBrief, ImageInput, LinearIssue,
-    PermissionMode, RequestResponse, SectionInfo, SendMode, UpdatePhase, UpdateStatus,
+    PermissionMode, RepoInfo, RequestResponse, SectionInfo, SendMode, UpdatePhase, UpdateStatus,
     WorkspaceInfo,
 };
 use chauffeur_protocol::workspace_share::{Guest, GuestRole};
@@ -89,6 +89,8 @@ enum Command {
     Repos {
         #[arg(long)]
         refresh: bool,
+        #[command(subcommand)]
+        action: Option<ReposAction>,
     },
     /// Create a workspace: one worktree per repo, on one branch.
     New {
@@ -629,6 +631,20 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum ReposAction {
+    /// Create a repo on GitHub, with a README, private unless --public; then pick it with
+    /// `chauffeur new --repo` (cloned on first use).
+    Create {
+        /// `owner/name`: the account's or one of its organizations'.
+        repo: String,
+        #[arg(long)]
+        public: bool,
+        #[arg(long)]
+        description: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum DaemonAction {
     Start,
     Stop {
@@ -1036,7 +1052,37 @@ async fn run(cli: Cli) -> anyhow::Result<i32> {
         Command::Cloud { action } => cloud::run(action, &mut client, json).await?,
         Command::Import { source } => import::run(source, &mut client, json).await?,
         Command::Worker { action } => worker::run(action, &mut client, json).await?,
-        Command::Repos { refresh } => {
+        Command::Repos {
+            action:
+                Some(ReposAction::Create {
+                    repo,
+                    public,
+                    description,
+                }),
+            ..
+        } => {
+            let Some((owner, name)) = repo.split_once('/') else {
+                anyhow::bail!("name the repo owner/name: {repo:?} has no owner");
+            };
+            let created: RepoInfo = client
+                .call(ClientCall::ReposCreate(CreateRepoParams {
+                    owner: owner.into(),
+                    name: name.into(),
+                    private: !public,
+                    description,
+                }))
+                .await?;
+            print_or(json, &created, || {
+                format!(
+                    "Created github.com/{}: add it with `chauffeur new --repo {}`",
+                    created.full_name, created.key
+                )
+            });
+        }
+        Command::Repos {
+            refresh,
+            action: None,
+        } => {
             let result: ReposListResult = client
                 .call(ClientCall::ReposList(ReposListParams { refresh }))
                 .await?;
