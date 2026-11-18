@@ -40,6 +40,7 @@ import {
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { clockTime, workspaceName, workspaceRepoNames, workspaceRepos } from "@/lib/format";
+import { forgeWords } from "@/lib/forge";
 import { openExternal } from "@/lib/native";
 import { errorMessage } from "@/lib/rpc";
 import { routineOfWorkspace, routinesSection, scheduleText, stateText, suggestionsText } from "@/lib/routines";
@@ -97,6 +98,7 @@ import { WorkspaceShareDialog } from "./WorkspaceShareDialog";
 import { chatIdsOf, pendingCount, shareIndicator } from "@/lib/workspaceShare";
 import { useWorkspaceShares } from "@/state/workspaceShares";
 import { PR_STATUS_LABEL, prSummary, prSummaryTitle, type PrStatusKind } from "@/lib/prSummary";
+import { useForge } from "@/state/gitlab";
 import { useSidebarPrOverview, useWorkspacePrs } from "@/state/workspacePrs";
 import { TransferDialog } from "./TransferDialog";
 import { devServicesCopy } from "@/lib/devServices";
@@ -1286,12 +1288,14 @@ function RowPrs({ workspaceId }: { workspaceId: string }) {
   const prs = useWorkspacePrs((s) => s[workspaceId]);
   const summary = useMemo(() => prSummary(prs), [prs]);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const words = forgeWords(useForge());
   if (!shown || !summary) return null;
   const [Glyph, tone] = PR_GLYPH[summary.kind];
   const first = summary.prs[0]!.pr;
   const others = summary.prs.length - 1;
-  const open = (event: React.MouseEvent) => {
+  const open = (event: React.MouseEvent | React.KeyboardEvent) => {
     event.stopPropagation();
+    event.preventDefault();
     if (others === 0) {
       if (first.url) void openExternal(first.url);
       return;
@@ -1303,7 +1307,7 @@ function RowPrs({ workspaceId }: { workspaceId: string }) {
     const [Icon, color] = PR_GLYPH[kind];
     return {
       // The menu is narrow: the state is the icon's colour, and in words in the tooltip.
-      label: `#${pr.number} ${pr.group ? `${pr.group} · ` : ""}${pr.repo}`,
+      label: `${words.number(pr.number)} ${pr.group ? `${pr.group} · ` : ""}${pr.repo}`,
       icon: <Icon size={13} className={color} />,
       hint: `${PR_STATUS_LABEL[kind]}${pr.title ? ` — ${pr.title}` : ""}`,
       disabled: !pr.url,
@@ -1314,13 +1318,19 @@ function RowPrs({ workspaceId }: { workspaceId: string }) {
     <>
       <span
         role="link"
-        title={`${others === 0 ? "Open it on GitHub" : "Open one on GitHub"}\n${prSummaryTitle(summary)}`}
+        tabIndex={0}
+        aria-label={`${words.shorts}: ${PR_STATUS_LABEL[summary.kind]}`}
+        title={`${others === 0 ? "Open it" : "Open one"} on ${words.name}\n${prSummaryTitle(summary, words.number)}`}
         onClick={open}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") open(event);
+        }}
         data-testid="row-prs"
         data-pr-status={summary.kind}
         className="inline-flex shrink-0 cursor-pointer items-center gap-0.5 rounded px-0.5 text-[10.5px] leading-none tabular-nums text-muted hover:bg-hover hover:text-fg"
       >
-        <Glyph size={12} className={tone} />#{first.number}
+        <Glyph size={12} className={tone} />
+        {words.number(first.number)}
         {others > 0 && <span className="text-faint">+{others}</span>}
       </span>
       {menu && (

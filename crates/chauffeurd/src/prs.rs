@@ -71,6 +71,9 @@ struct Overview {
 const OVERVIEW_FULL: Duration = Duration::from_secs(300);
 /// Calls within this of the last one get its answer: several windows of the app ask together.
 const OVERVIEW_FRESH: Duration = Duration::from_secs(10);
+/// Workspaces read again in a round only because `OVERVIEW_FULL` passed: with a round every 20 s
+/// or so, 45 workspaces are each read every five minutes, more a little less often.
+const OVERVIEW_AGED: usize = 3;
 /// Workspaces read at once, each running git and `gh` in every worktree.
 const OVERVIEW_READS: usize = 4;
 
@@ -113,24 +116,17 @@ pub async fn overview(daemon: &Arc<Daemon>) -> Result<Vec<WorkspacePrs>> {
             .await
             .into_iter()
             .collect();
-        let due: Vec<(String, Option<String>)> = rows
-            .iter()
-            .filter_map(|row| {
-                let known = state.known.get(&row.id);
-                let open = open_signature(&worktrees[&row.id], known, &listings);
-                let due = match (known, &open) {
-                    (None, _) => true,
-                    (Some(known), Some(open)) => {
-                        known.open != *open || known.at.elapsed() >= OVERVIEW_FULL
-                    }
-                    // `gh` failed: what was read stands until its time is up.
-                    (Some(known), None) => known.at.elapsed() >= OVERVIEW_FULL,
-                };
-                due.then(|| (row.id.clone(), open))
-            })
-            .collect();
+        let signatures = rows.iter().map(|row| {
+            let known = state.known.get(&row.id);
+            let open = open_signature(&worktrees[&row.id], known, &listings);
+            (row.id.clone(), open)
+        });
+        let due = due_reads(signatures.collect(), &state.known);
         let read: Vec<_> = futures_util::stream::iter(due)
             .map(|(id, open)| async move {
+                // A read the header or the Office made seconds ago may predate the change the
+                // signature shows: kept with it, it would stand until `OVERVIEW_FULL`.
+                forget_status(&id);
                 let prs = cached_status(daemon, &id).await;
                 (id, open, prs)
             })
@@ -162,6 +158,36 @@ pub async fn overview(daemon: &Arc<Daemon>) -> Result<Vec<WorkspacePrs>> {
             })
         })
         .collect())
+}
+
+/// The workspaces to read this round, with their open PRs' signature (none when a listing
+/// failed): every one never read or whose open PRs changed and, of those past `OVERVIEW_FULL`,
+/// only the `OVERVIEW_AGED` oldest. Workspaces first read in the same round would otherwise all be
+/// read again together every five minutes.
+fn due_reads(
+    signatures: Vec<(String, Option<String>)>,
+    known: &HashMap<String, Known>,
+) -> Vec<(String, Option<String>)> {
+    let mut due = Vec::new();
+    let mut aged = Vec::new();
+    for (id, open) in signatures {
+        match known.get(&id) {
+            None => due.push((id, open)),
+            Some(known) if open.as_ref().is_some_and(|open| *open != known.open) => {
+                due.push((id, open))
+            }
+            // A failed listing tells nothing: what was read stands until its time is up.
+            Some(known) if known.at.elapsed() >= OVERVIEW_FULL => aged.push((known.at, id, open)),
+            Some(_) => {}
+        }
+    }
+    aged.sort_by_key(|(at, ..)| *at);
+    due.extend(
+        aged.into_iter()
+            .take(OVERVIEW_AGED)
+            .map(|(_, id, open)| (id, open)),
+    );
+    due
 }
 
 /// The open PRs of `listings` (each clone's, as `gh pr list` gives them) that are the workspace's:
@@ -1106,6 +1132,36 @@ mod tests {
             open_signature(&worktrees, None, &failed).is_none(),
             "a failed listing tells nothing"
         );
+    }
+
+    #[test]
+    fn workspaces_read_together_are_read_again_a_few_at_a_time() {
+        let ago = |seconds: u64| Instant::now() - Duration::from_secs(seconds);
+        let known = |open: &str, at: Instant| Known {
+            prs: Vec::new(),
+            open: open.into(),
+            at,
+        };
+        let mut read = HashMap::new();
+        for (id, seconds) in [("a", 400), ("b", 360), ("c", 330), ("d", 320), ("e", 310)] {
+            read.insert(id.to_string(), known("same", ago(seconds)));
+        }
+        read.insert("fresh".to_string(), known("same", ago(5)));
+        read.insert("changed".to_string(), known("before", ago(5)));
+        read.insert("unlisted".to_string(), known("same", ago(5)));
+        let signatures = ["a", "b", "c", "d", "e", "fresh", "changed", "new"]
+            .map(|id| {
+                let open = if id == "changed" { "after" } else { "same" };
+                (id.to_string(), Some(open.to_string()))
+            })
+            .into_iter()
+            .chain([("unlisted".to_string(), None)])
+            .collect();
+        let due: Vec<String> = due_reads(signatures, &read)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(due, ["changed", "new", "a", "b", "c"]);
     }
 
     #[test]

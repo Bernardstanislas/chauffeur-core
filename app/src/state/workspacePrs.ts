@@ -4,7 +4,7 @@
 // PRs changed, so the user's GitHub quota holds at this pace.
 
 import type { PrInfo } from "@chauffeur/protocol";
-import { useEffect } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import { create } from "zustand";
 import { client, useApp } from "./app";
 
@@ -19,11 +19,18 @@ export function recordPrs(workspace: string, prs: PrInfo[]) {
  * 10 s earlier for another window: a change shows within 30 s. */
 const PACE = 20_000;
 
-/** Asks the daemon for every ready workspace's PRs while `on`, then again `PACE` after each answer. */
+function onVisibility(change: () => void) {
+  document.addEventListener("visibilitychange", change);
+  return () => document.removeEventListener("visibilitychange", change);
+}
+
+/** Asks the daemon for every ready workspace's PRs while `on` and the window is shown, then again
+ *  `PACE` after each answer; at once when the window shows again. */
 export function useSidebarPrOverview(on: boolean) {
   const connected = useApp((s) => s.connection.status === "open");
+  const shown = useSyncExternalStore(onVisibility, () => !document.hidden);
   useEffect(() => {
-    if (!on || !connected) return;
+    if (!on || !connected || !shown) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = async () => {
@@ -41,5 +48,5 @@ export function useSidebarPrOverview(on: boolean) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [on, connected]);
+  }, [on, connected, shown]);
 }

@@ -52,7 +52,7 @@ describe("prSummary", () => {
       pr("web", { group: "xyz-2", branch: "xyz-2", number: 13n, title: null, is_draft: true }),
     ]);
     expect(summary?.kind).toBe("failing");
-    expect(summary && prSummaryTitle(summary)).toBe(
+    expect(summary && prSummaryTitle(summary, (n) => `#${n}`)).toBe(
       "web #12 Facet filters — checks failed\nxyz-2 · web #13 — draft\napi #12 Facet API — merged",
     );
   });

@@ -60,12 +60,13 @@ export function prSummary(prs: PrInfo[] | undefined): PrSummary | null {
   return { kind: ranked[0]!.kind, prs: ranked };
 }
 
-/** `web #12 Facet filters — checks failed`, one line per PR, for the row's tooltip. */
-export function prSummaryTitle(summary: PrSummary): string {
+/** `web #12 Facet filters — checks failed`, one line per PR, for the row's tooltip; `number` writes
+ *  `#12`, or `!12` on a GitLab. */
+export function prSummaryTitle(summary: PrSummary, number: (n: bigint | null) => string): string {
   return summary.prs
     .map(({ pr, kind }) => {
       const repo = pr.group ? `${pr.group} · ${pr.repo}` : pr.repo;
-      return `${repo} #${pr.number}${pr.title ? ` ${pr.title}` : ""} — ${PR_STATUS_LABEL[kind]}`;
+      return `${repo} ${number(pr.number)}${pr.title ? ` ${pr.title}` : ""} — ${PR_STATUS_LABEL[kind]}`;
     })
     .join("\n");
 }
