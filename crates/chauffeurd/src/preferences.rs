@@ -538,25 +538,65 @@ fn set_workspace_limits(d: &Daemon, update: &WorkspaceDefaultsUpdate) -> Result<
                 doc["github_sources"] = toml_edit::value(sources);
             }
             if let Some(repos) = &repos {
-                doc.remove("repos");
-                if !repos.is_empty() {
-                    let mut tables = toml_edit::Table::new();
-                    tables.set_implicit(true);
-                    for repo in repos {
-                        let mut table = toml_edit::Table::new();
-                        if let Some(path) = &repo.path {
-                            table["path"] = toml_edit::value(path.as_str());
-                        }
-                        if let Some(branch) = &repo.default_branch {
-                            table["default_branch"] = toml_edit::value(branch.as_str());
-                        }
-                        tables.insert(&repo.name, toml_edit::Item::Table(table));
-                    }
-                    doc["repos"] = toml_edit::Item::Table(tables);
-                }
+                set_repo_tables(doc, repos);
             }
         })
         .map_err(refused)
+}
+
+/// Writes the settings window's repos table into `[repos.<name>]`: a row sets only the `path`
+/// and `default_branch` the table shows, so that what it does not show (`scripts`, `env`, any
+/// other key, comments) stays; a row removed takes its whole table with it.
+fn set_repo_tables(doc: &mut toml_edit::DocumentMut, repos: &[RepoSetting]) {
+    let item = doc.entry("repos").or_insert(toml_edit::Item::None);
+    if item.as_table_like().is_none() {
+        let mut tables = toml_edit::Table::new();
+        tables.set_implicit(true);
+        *item = toml_edit::Item::Table(tables);
+    }
+    let Some(tables) = item.as_table_like_mut() else {
+        return;
+    };
+    let removed: Vec<String> = tables
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .filter(|name| !repos.iter().any(|repo| &repo.name == name))
+        .collect();
+    for name in removed {
+        tables.remove(&name);
+    }
+    for repo in repos {
+        let table = tables
+            .entry(&repo.name)
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(table) = table.as_table_like_mut() else {
+            continue;
+        };
+        set_or_remove(table, "path", repo.path.as_deref());
+        set_or_remove(table, "default_branch", repo.default_branch.as_deref());
+    }
+}
+
+/// Sets `key` to `value`, or removes it; an unchanged value is left as written, and a changed one
+/// keeps its comments.
+fn set_or_remove(table: &mut dyn toml_edit::TableLike, key: &str, value: Option<&str>) {
+    let Some(value) = value else {
+        table.remove(key);
+        return;
+    };
+    match table.get_mut(key) {
+        Some(item) if item.as_str() == Some(value) => {}
+        Some(item) => {
+            let decor = item.as_value().map(|old| old.decor().clone());
+            *item = toml_edit::value(value);
+            if let (Some(decor), Some(new)) = (decor, item.as_value_mut()) {
+                *new.decor_mut() = decor;
+            }
+        }
+        None => {
+            table.insert(key, toml_edit::value(value));
+        }
+    }
 }
 
 /// A repo's name, clone path and default branch, trimmed; blanks dropped, a name only once.
@@ -892,6 +932,83 @@ fn set_workers(d: &Daemon, workers: chauffeur_protocol::client::WorkerConfigurat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_the_repos_table_changes_only_the_path_and_branch_of_each_repo() {
+        let mut doc: toml_edit::DocumentMut = r#"github_org = ""
+
+[repos.web]
+# The work clone.
+path = "~/code/web" # synced
+default_branch = "main"
+other = 1
+
+[repos.web.scripts]
+setup = "pnpm install"
+
+[repos.web.env]
+API_TOKEN = "s3cret-fixture-value"
+
+[repos.api]
+# Kept as written.
+path = '~/code/api'
+
+[repos.gone]
+path = "~/code/gone"
+
+[repos.gone.env]
+KEEP = "1"
+"#
+        .parse()
+        .unwrap();
+        let row = |name: &str, path: Option<&str>, branch: Option<&str>| RepoSetting {
+            name: name.into(),
+            path: path.map(Into::into),
+            default_branch: branch.map(Into::into),
+        };
+
+        set_repo_tables(
+            &mut doc,
+            &[
+                row("web", Some("~/src/web"), None),
+                row("api", Some("~/code/api"), None),
+                row("new", Some("~/code/new"), Some("develop")),
+            ],
+        );
+
+        assert_eq!(
+            doc.to_string(),
+            r#"github_org = ""
+
+[repos.web]
+# The work clone.
+path = "~/src/web" # synced
+other = 1
+
+[repos.web.scripts]
+setup = "pnpm install"
+
+[repos.web.env]
+API_TOKEN = "s3cret-fixture-value"
+
+[repos.api]
+# Kept as written.
+path = '~/code/api'
+
+[repos.new]
+path = "~/code/new"
+default_branch = "develop"
+"#
+        );
+
+        set_repo_tables(&mut doc, &[]);
+        assert_eq!(doc.to_string(), "github_org = \"\"\n");
+
+        // A hand-written `repos` that is not a table is replaced, as before.
+        let mut doc: toml_edit::DocumentMut = "repos = []\n".parse().unwrap();
+        set_repo_tables(&mut doc, &[row("web", Some("~/code/web"), None)]);
+        assert_eq!(doc.to_string(), "[repos.web]\npath = \"~/code/web\"\n");
+    }
 
     #[test]
     fn branch_prefixes_git_takes() {
