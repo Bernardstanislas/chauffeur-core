@@ -1067,6 +1067,10 @@ impl ChatManager {
                     .into_owned()
             }),
             brands_dir: brands.as_ref().map(|b| b.root.clone()),
+            memory_clone: match chat.agent {
+                AgentKind::Claude => first_clone(&d.store, &workspace.id)?,
+                AgentKind::Codex | AgentKind::Vibe => None,
+            },
             resume_session_id: chat.agent_session_id.clone(),
             env,
             append_system_prompt: system_prompt(
@@ -4145,6 +4149,15 @@ pub fn repo_dirs(workspace: &WorkspaceInfo) -> Vec<String> {
         .filter(|w| w.origin == WorktreeOrigin::Workspace && !w.removed)
         .map(|w| w.path.clone())
         .collect()
+}
+
+/// The clone of the workspace's first repo, as the workspace lists its repos.
+fn first_clone(store: &crate::store::Store, workspace: &str) -> Result<Option<String>> {
+    Ok(store
+        .worktrees_of(workspace)?
+        .into_iter()
+        .find(|w| w.origin == WorktreeOrigin::Workspace && !w.removed)
+        .map(|w| w.clone_path))
 }
 
 /// Whether a status change deserves the user's attention (an unread workspace): a turn ended or

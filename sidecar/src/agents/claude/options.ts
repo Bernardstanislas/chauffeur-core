@@ -16,6 +16,7 @@ import { RpcError } from "../../rpc/peer.ts";
 import { SIDECAR_VERSION } from "../../version.ts";
 import type { Hooks } from "./hooks.ts";
 import { USER_JEV_PLUGIN } from "./jev.ts";
+import { type CloneMemory, memoryPrompt } from "./memory.ts";
 import { DELEGATE_TOOL } from "../delegate-tool.ts";
 import { DESIGN_BROWSER, designBrowserCommand } from "../design-browser.ts";
 import { ADD_REPO_TOOL, CHAUFFEUR_TOOLS, LIST_REPOS_TOOL, UPDATE_PLAN_TOOL } from "../repo-tools.ts";
@@ -103,20 +104,29 @@ export function designBrowser(designDir: string): McpStdioServerConfig {
 }
 
 /**
- * Allow rules for reading a folder and everything in it, as Claude Code writes an absolute path
+ * `tool` rules for a folder and everything in it, as Claude Code writes an absolute path
  * (`//abs/**`): the path as given and, when it goes through a symlink (macOS's /tmp), as resolved,
  * since Claude Code may compare either.
  */
-export function notesReadRules(notesDir: string | undefined): { allow?: string[] } {
-  if (!notesDir) return {};
-  const paths = [notesDir];
+function folderRules(tool: "Read" | "Edit", dir: string): string[] {
+  const paths = [dir];
   try {
-    const real = realpathSync(notesDir);
-    if (real !== notesDir) paths.push(real);
+    const real = realpathSync(dir);
+    if (real !== dir) paths.push(real);
   } catch {
     // Not made yet: the path as given.
   }
-  return { allow: paths.map((path) => `Read(/${path.replace(/\/+$/, "")}/**)`) };
+  return paths.map((path) => `${tool}(/${path.replace(/\/+$/, "")}/**)`);
+}
+
+/** Allow rules for reading a folder and everything in it. */
+export function notesReadRules(notesDir: string | undefined): { allow?: string[] } {
+  return notesDir ? { allow: folderRules("Read", notesDir) } : {};
+}
+
+/** Adds `rules` to the session's own `kind` rules. */
+function addRules(settings: Settings, kind: "allow" | "deny", rules: string[]): void {
+  settings.permissions = { ...settings.permissions, [kind]: [...(settings.permissions?.[kind] ?? []), ...rules] };
 }
 
 /**
@@ -167,6 +177,8 @@ export interface OptionDeps {
   jevPluginDir: () => string;
   /** Chauffeur's own tools (the repo tools, `delegate`), for every chat but a design chat's. */
   repoTools?: McpSdkServerConfigWithInstance;
+  /** The user's memory of the workspace's first repo, read from its clone for this session. */
+  memory?: CloneMemory;
 }
 
 /**
@@ -242,13 +254,19 @@ export function buildClaudeOptions(params: SessionStartParams, deps: OptionDeps)
   // The brands a chat builds its decks and documents with (docs/adr/brands.md): read without
   // asking, though it sits outside the working directories; never written from this chat.
   if (params.brands_dir && !params.design_dir) {
-    settings.permissions = { ...settings.permissions, allow: [...(settings.permissions?.allow ?? []), ...(notesReadRules(params.brands_dir).allow ?? [])] };
+    addRules(settings, "allow", folderRules("Read", params.brands_dir));
   }
   // The repo tools (story 48), never in a design chat: allowed here so that neither a mode that asks
   // nor auto mode's classifier stands between the agent and `add_repo`'s own question.
   if (deps.repoTools && !params.design_dir) {
     options.mcpServers = { [CHAUFFEUR_TOOLS]: deps.repoTools };
-    settings.permissions = { ...settings.permissions, allow: [...(settings.permissions?.allow ?? []), ...CHAUFFEUR_TOOL_RULES] };
+    addRules(settings, "allow", CHAUFFEUR_TOOL_RULES);
+  }
+  // The clone's memory folder (docs/adr/claude-memory-per-repo.md): its topic files read without
+  // asking, though it sits outside the working directories; never written from a workspace.
+  if (deps.memory) {
+    addRules(settings, "allow", folderRules("Read", deps.memory.dir));
+    addRules(settings, "deny", folderRules("Edit", deps.memory.dir));
   }
   if (params.jev) {
     options.plugins = [{ type: "local", path: deps.jevPluginDir() }];
@@ -259,9 +277,8 @@ export function buildClaudeOptions(params: SessionStartParams, deps: OptionDeps)
   }
   if (Object.keys(settings).length > 0) options.settings = settings;
   if (params.resume_session_id) options.resume = params.resume_session_id;
-  if (params.append_system_prompt) {
-    options.systemPrompt = { type: "preset", preset: "claude_code", append: params.append_system_prompt };
-  }
+  const append = [params.append_system_prompt, deps.memory && memoryPrompt(deps.memory)].filter(Boolean).join("\n\n");
+  if (append) options.systemPrompt = { type: "preset", preset: "claude_code", append };
   if (deps.executable) options.pathToClaudeCodeExecutable = deps.executable;
   return options;
 }
