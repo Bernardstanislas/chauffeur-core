@@ -419,6 +419,11 @@ const TEMPLATE: &str = r#"# Chauffeur's settings. The app's Settings (⌘,) chan
 # apply in workspaces too, but for the allow rules naming the clone. false: never read.
 # clone_local_claude_settings = true
 
+# A Claude chat starts with the Claude Code memory of its workspace's first repo, read from the
+# repo's clone (what you taught Claude there), and is told where the other repos' are; all
+# read-only. false: no clone's memory is read.
+# clone_claude_memory = true
+
 # Daily session review at 18:00 local time. Model unset: the usual default.
 # [daily_review]
 # enabled = true
@@ -469,11 +474,12 @@ const TEMPLATE: &str = r#"# Chauffeur's settings. The app's Settings (⌘,) chan
 # zone = "europe-west9-a"
 
 # A clone outside the clone folders, or another default branch, for one repo; and whether its
-# clone's .claude/settings.local.json is read, over the setting above:
+# clone's .claude/settings.local.json and Claude memory are read, over the settings above:
 # [repos.my-app]
 # path = "~/code/my-app"
 # default_branch = "main"
 # clone_local_claude_settings = false
+# clone_claude_memory = false
 "#;
 
 /// Writes `settings.toml` from the template when it does not exist.
@@ -1091,13 +1097,21 @@ default_branch = "develop"
     }
 
     #[test]
-    fn the_template_parses_to_the_defaults() {
+    fn the_template_parses_to_the_defaults_and_its_keys_uncomment_where_they_belong() {
         let settings: crate::settings::UserSettings = toml::from_str(TEMPLATE).unwrap();
         assert!(settings.github_org.is_empty());
         assert!(settings.default_repos.is_empty());
         assert!(settings.clone_roots.is_empty());
         assert!(settings.workers.project.is_empty());
         assert!(settings.prompt_suggestions);
+        assert!(settings.clone_claude_memory);
+        // Uncommented where the template has it, the key is a top-level one, not a table's.
+        let off: crate::settings::UserSettings = toml::from_str(&TEMPLATE.replace(
+            "# clone_claude_memory = true",
+            "clone_claude_memory = false",
+        ))
+        .unwrap();
+        assert!(!off.clone_claude_memory);
     }
 
     #[test]
