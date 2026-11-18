@@ -298,7 +298,8 @@ impl RepoRegistry {
     /// Creates `owner/name` on GitHub with a README (a worktree needs a commit to branch from)
     /// and caches it, so that the picker lists it and a workspace clones it on first use.
     /// `account` is the login `gh` is signed in to: another owner is one of its organizations.
-    /// A repo the cache or a clone already knows is refused before GitHub is asked.
+    /// A repo the cache or a clone already knows is refused before GitHub is asked; one only GitHub
+    /// knows is refused by it, also as a `Conflict`.
     pub async fn create(
         &self,
         params: CreateRepoParams,
@@ -332,7 +333,8 @@ impl RepoRegistry {
         create_on_github(&full_name, params.private, description.as_deref(), env).await?;
         let repo = CachedRepo {
             name: params.name,
-            owner_is_org: account.is_some_and(|login| !login.eq_ignore_ascii_case(&params.owner)),
+            owner_is_org: is_main(&settings, &params.owner)
+                || account.is_some_and(|login| !login.eq_ignore_ascii_case(&params.owner)),
             full_name,
             private: params.private,
             default_branch: None,
@@ -865,10 +867,15 @@ async fn create_on_github(
                 .into(),
         })?;
     if !output.status.success() {
-        return Err(Error::Unavailable(format!(
-            "could not create {full_name} on GitHub: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = format!("could not create {full_name} on GitHub: {}", stderr.trim());
+        // A name taken on GitHub (a repo the cache does not list yet) is the client's to change,
+        // like one the cache knows; anything else is GitHub's or gh's.
+        return Err(if stderr.contains("already exists") {
+            Error::Conflict(message)
+        } else {
+            Error::Unavailable(message)
+        });
     }
     Ok(())
 }
@@ -1188,7 +1195,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_created_repo_is_listed_at_once_and_one_that_exists_is_refused_before_github() {
+    async fn a_created_repo_is_listed_at_once_and_one_that_exists_is_refused() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let (registry, settings) = registry(dir.path(), &[cached("someone/blog")]);
@@ -1283,13 +1290,22 @@ mod tests {
         ));
         assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
 
-        let Err(Error::Unavailable(error)) = registry
+        // A name only GitHub knows is refused by it, as a conflict too.
+        let Err(Error::Conflict(error)) = registry
             .create(params("someone", "taken", true, None), None, &env)
             .await
         else {
             panic!("GitHub's refusal is told");
         };
         assert!(error.contains("Name already exists"), "{error}");
+        let org = registry
+            .create(params("example", "unknown-account", true, None), None, &env)
+            .await
+            .unwrap();
+        assert!(
+            org.owner_is_org,
+            "the main organization is one, whatever gh says of the account"
+        );
         assert!(
             !registry
                 .cached_listing()

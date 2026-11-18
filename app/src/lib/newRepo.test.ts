@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { newRepoOwners, repoNameError, suggestedRepoName } from "./newRepo";
+import { newRepoOwners, noOwnerReason, repoNameError, suggestedRepoName, typedRepoName } from "./newRepo";
 
 test("a new repo goes to the account first, then its organizations, each once", () => {
   expect(newRepoOwners("tester", "acme", ["acme", "Other"], true)).toEqual(["tester", "acme", "Other"]);
@@ -24,4 +24,14 @@ test("a repo name is one plain folder name", () => {
   expect(repoNameError("")).not.toBeNull();
   expect(repoNameError(".github")).not.toBeNull();
   expect(repoNameError("my app")).not.toBeNull();
+});
+
+test("a space typed in the name becomes a hyphen", () => {
+  expect(typedRepoName("my new")).toBe("my-new");
+  expect(typedRepoName("my  ")).toBe("my-");
+});
+
+test("without an owner, the form says whether GitHub or the main organization is missing", () => {
+  expect(noOwnerReason(null)).toContain("not connected");
+  expect(noOwnerReason("tester")).toContain("No main organization");
 });

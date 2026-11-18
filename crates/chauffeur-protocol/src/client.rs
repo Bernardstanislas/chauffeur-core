@@ -348,7 +348,7 @@ methods! {
         /// Creates a repo on GitHub, with a README so that it has a first commit to branch from,
         /// and returns it as the picker lists it, to add to a workspace (cloned on first use).
         #[serde(rename = "repos.create")]
-        #[access(Any)]
+        #[access(User)]
         #[relay(Local)]
         ReposCreate(CreateRepoParams) -> RepoInfo,
         #[serde(rename = "workspace.create")]

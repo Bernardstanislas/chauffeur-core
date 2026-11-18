@@ -86,6 +86,7 @@ enum Command {
     /// Check what Chauffeur needs on this machine.
     Doctor,
     /// Repos a workspace can include, `owner/name` outside the main organization (* = default selection).
+    #[command(args_conflicts_with_subcommands = true)]
     Repos {
         #[arg(long)]
         refresh: bool,

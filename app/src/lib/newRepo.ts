@@ -14,6 +14,19 @@ export function newRepoOwners(account: string | null, organization: string, orga
   return owners;
 }
 
+/** Why no owner can take a new repo: GitHub is not connected, or, with only the main
+ *  organization's repos listed (`github_sources = false`), none is set. */
+export function noOwnerReason(account: string | null): string {
+  return account
+    ? "No main organization is set: choose one in Settings › GitHub to create a repository."
+    : "GitHub is not connected: connect it in Settings › GitHub to create a repository.";
+}
+
+/** The name field as typed: spaces become hyphens, as GitHub turns them. */
+export function typedRepoName(value: string): string {
+  return value.replace(/\s+/g, "-");
+}
+
 /** What the picker's search becomes as a repo name, as GitHub would suggest it: spaces and other
  *  characters turned into hyphens. Empty for a pasted URL or an `owner/name`. */
 export function suggestedRepoName(filter: string): string {

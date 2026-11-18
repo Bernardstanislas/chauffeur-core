@@ -178,11 +178,13 @@ mod tests {
             "slack.receive",
             "daemon.shutdown",
             "update.install",
+            "repos.create",
         ] {
             let params = match method {
                 "terminal.list" => json!({"workspace":"w"}),
                 "slack.receive" => json!({"focused":false,"ack":null}),
                 "slack.context" => json!({"link":"chauffeur://slack/test"}),
+                "repos.create" => json!({"owner":"o","name":"n","private":true}),
                 _ => json!({}),
             };
             let call = call(method, params);

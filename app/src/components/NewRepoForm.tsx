@@ -1,7 +1,7 @@
 import type { RepoInfo } from "@chauffeur/protocol";
 import { ArrowLeft, Globe, Lock } from "lucide-react";
 import { type FormEvent, useState } from "react";
-import { newRepoOwners, repoNameError } from "@/lib/newRepo";
+import { newRepoOwners, noOwnerReason, repoNameError, typedRepoName } from "@/lib/newRepo";
 import { errorMessage } from "@/lib/rpc";
 import { client, rememberRepos } from "@/state/app";
 import { useGithubSource } from "@/state/github";
@@ -66,7 +66,7 @@ export function NewRepoForm({ initialName, onCancel, onCreated }: { initialName:
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 pt-3 pb-2">
         {owners.length === 0 ? (
           <div className="text-[12px] text-muted" data-testid="new-repo-no-owner">
-            GitHub is not connected: connect it in Settings › GitHub to create a repository.
+            {noOwnerReason(github?.account ?? null)}
           </div>
         ) : (
           <>
@@ -94,7 +94,7 @@ export function NewRepoForm({ initialName, onCancel, onCreated }: { initialName:
                   data-autofocus
                   className={cx(inputClass, nameError && "border-danger/60")}
                   value={name}
-                  onChange={(e) => setName(e.target.value.trim())}
+                  onChange={(e) => setName(typedRepoName(e.target.value))}
                   placeholder="my-new-repo"
                   spellCheck={false}
                   aria-invalid={!!nameError}

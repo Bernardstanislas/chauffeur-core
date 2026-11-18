@@ -35,6 +35,12 @@ Decided by Stan 2026-11-17:
   workspace would take it from. It refuses before GitHub is asked. Otherwise GitHub's refusal is
   returned as it is.
 - The new repo goes into the repos cache with the time it was created as its last push. The picker
-  lists it first until GitHub lists the repos again.
+  lists it first until GitHub lists the repos again. A GitHub listing already under way when the
+  repo is created replaces the cache without it: the repo then leaves the picker until the next
+  listing. It stays selected in the dialog, by its name.
+- A name taken on GitHub is a `Conflict`, as one the cache knows; GitHub or `gh` failing otherwise
+  is `Unavailable`.
+- `repos.create` is the user's (the app and their CLI), never an agent's: a workspace's agent
+  reaches `chauffeur` without its Bash permission checks.
 - Left for later: a template or a `.gitignore` to start from, creating a repo from the phone, and an
   agent's own repo creation through the `chauffeur` tools.
