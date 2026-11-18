@@ -25,6 +25,7 @@ import { type RemoteOpen, watchRemote } from "@/lib/workers";
 import { client, openSettings, toast, upsertWorkspace } from "@/state/app";
 import { useRepoCatalog } from "@/state/repos";
 import { useWorkspaceSelector, useWorkspaceSession, type WorkspaceSession } from "@/state/session";
+import { recordPrs } from "@/state/workspacePrs";
 import { OpenButton } from "./OpenButton";
 import { PrRow, type PrStatus } from "./PrChips";
 import { PromoteDialog } from "./PromoteDialog";
@@ -490,6 +491,7 @@ function usePrStatus(workspace: WorkspaceInfo, session: WorkspaceSession): PrSta
       try {
         const result = await client.call("pr.status", { workspace: workspace.id });
         if (!cancelled) setState({ prs: result.prs, error: null, loading: false });
+        recordPrs(workspace.id, result.prs);
       } catch (error) {
         if (!cancelled) setState({ prs: null, error: errorMessage(error), loading: false });
         if (isNotImplemented(error)) return;

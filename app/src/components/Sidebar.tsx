@@ -11,6 +11,10 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  GitPullRequestDraft,
   Layers,
   Mail,
   MailOpen,
@@ -36,6 +40,7 @@ import {
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { clockTime, workspaceName, workspaceRepoNames, workspaceRepos } from "@/lib/format";
+import { openExternal } from "@/lib/native";
 import { errorMessage } from "@/lib/rpc";
 import { routineOfWorkspace, routinesSection, scheduleText, stateText, suggestionsText } from "@/lib/routines";
 import {
@@ -91,6 +96,8 @@ import { DevServicesDialog } from "./DevServicesDialog";
 import { WorkspaceShareDialog } from "./WorkspaceShareDialog";
 import { chatIdsOf, pendingCount, shareIndicator } from "@/lib/workspaceShare";
 import { useWorkspaceShares } from "@/state/workspaceShares";
+import { PR_STATUS_LABEL, prSummary, prSummaryTitle, type PrStatusKind } from "@/lib/prSummary";
+import { useSidebarPrOverview, useWorkspacePrs } from "@/state/workspacePrs";
 import { TransferDialog } from "./TransferDialog";
 import { devServicesCopy } from "@/lib/devServices";
 import { batchCounts, transferCopy, transferUnavailable } from "@/lib/transfer";
@@ -137,6 +144,8 @@ export function Sidebar() {
   const groups = useMemo(() => sidebarGroups(workspaces, sections), [workspaces, sections]);
   const routines = useApp((s) => s.routines);
   const routinesSectionId = useMemo(() => routinesSection(routines, workspaces), [routines, workspaces]);
+  const showPrs = useApp((s) => !!s.appearance?.sidebar_pr_status);
+  useSidebarPrOverview(showPrs);
   const activeCount = groups.reduce((n, g) => n + g.rows.length, 0);
   // ⌘1–9 follow the rows shown: folded sections and folded children are skipped.
   const collapsedList = useApp((s) => s.collapsedParents);
@@ -932,6 +941,7 @@ const WorkspaceRow = memo(function WorkspaceRow({
           {unread && <span title="Unread" className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
           <TasksCount count={workspace.running_tasks ?? 0} />
           <ShareMark workspaceId={workspace.id} />
+          <RowPrs workspaceId={workspace.id} />
           <RowBadge workspace={workspace} />
           {shortcut != null && (
             <span className="hidden text-[10.5px] text-faint group-hover:inline">{kbd(`⌘${shortcut}`)}</span>
@@ -1246,6 +1256,77 @@ function ShareMark({ workspaceId }: { workspaceId: string }) {
         <span title={indicator.title} aria-label={indicator.title} data-testid="row-shared" className="inline-flex shrink-0 items-center gap-0.5 text-[10.5px] text-accent">
           <Users size={11} />
           {indicator.viewers > 0 && <span className="tabular-nums">{indicator.viewers}</span>}
+        </span>
+      )}
+    </>
+  );
+}
+
+/** Lucide's glyph for each state, tinted by how much it needs the user. */
+const PR_GLYPH: Record<PrStatusKind, [typeof GitPullRequest, string]> = {
+  failing: [GitPullRequest, "text-danger"],
+  conflict: [GitPullRequest, "text-danger"],
+  changes: [GitPullRequest, "text-danger"],
+  running: [GitPullRequest, "text-attention"],
+  review: [GitPullRequest, "text-muted"],
+  open: [GitPullRequest, "text-muted"],
+  ready: [GitPullRequest, "text-success"],
+  draft: [GitPullRequestDraft, "text-faint"],
+  merged: [GitMerge, "text-accent"],
+  closed: [GitPullRequestClosed, "text-faint"],
+};
+
+/**
+ * The workspace's pull requests: the most urgent state's glyph and the number of its PR, `+N` for
+ * the others. A click opens the PR on GitHub, or with several a menu of them; the row itself is not
+ * selected.
+ */
+function RowPrs({ workspaceId }: { workspaceId: string }) {
+  const shown = useApp((s) => !!s.appearance?.sidebar_pr_status);
+  const prs = useWorkspacePrs((s) => s[workspaceId]);
+  const summary = useMemo(() => prSummary(prs), [prs]);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  if (!shown || !summary) return null;
+  const [Glyph, tone] = PR_GLYPH[summary.kind];
+  const first = summary.prs[0]!.pr;
+  const others = summary.prs.length - 1;
+  const open = (event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (others === 0) {
+      if (first.url) void openExternal(first.url);
+      return;
+    }
+    const box = event.currentTarget.getBoundingClientRect();
+    setMenu({ x: box.left, y: box.bottom + 4 });
+  };
+  const items: MenuItem[] = summary.prs.map(({ pr, kind }) => {
+    const [Icon, color] = PR_GLYPH[kind];
+    return {
+      // The menu is narrow: the state is the icon's colour, and in words in the tooltip.
+      label: `#${pr.number} ${pr.group ? `${pr.group} · ` : ""}${pr.repo}`,
+      icon: <Icon size={13} className={color} />,
+      hint: `${PR_STATUS_LABEL[kind]}${pr.title ? ` — ${pr.title}` : ""}`,
+      disabled: !pr.url,
+      onSelect: () => pr.url && void openExternal(pr.url),
+    };
+  });
+  return (
+    <>
+      <span
+        role="link"
+        title={`${others === 0 ? "Open it on GitHub" : "Open one on GitHub"}\n${prSummaryTitle(summary)}`}
+        onClick={open}
+        data-testid="row-prs"
+        data-pr-status={summary.kind}
+        className="inline-flex shrink-0 cursor-pointer items-center gap-0.5 rounded px-0.5 text-[10.5px] leading-none tabular-nums text-muted hover:bg-hover hover:text-fg"
+      >
+        <Glyph size={12} className={tone} />#{first.number}
+        {others > 0 && <span className="text-faint">+{others}</span>}
+      </span>
+      {menu && (
+        // The menu is a portal: its clicks would still reach the row's button through React.
+        <span onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.stopPropagation()}>
+          <ContextMenu x={menu.x} y={menu.y} items={items} onClose={() => setMenu(null)} />
         </span>
       )}
     </>

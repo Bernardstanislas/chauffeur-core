@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use chauffeur_protocol::client::{
     CommandsListResult, DiffResult, FileContent, FileKind, FilesListResult, LinearSearchResult,
     LinearStatesResult, LoadoutParams, MergePrsResult, ModelsListResult, OpenAppsResult,
-    PrStatusResult, QueueResult, ShippedResult, TerminalCwdResult, TerminalSnapshotResult,
-    TerminalsResult,
+    PrOverviewResult, PrStatusResult, QueueResult, ShippedResult, TerminalCwdResult,
+    TerminalSnapshotResult, TerminalsResult,
 };
 use chauffeur_protocol::events::RegistryEvent;
 
@@ -764,6 +764,9 @@ async fn handle_other(daemon: &Arc<Daemon>, call: ClientCall) -> Result<Value> {
         }),
         ClientCall::PrStatus(params) => to_value(PrStatusResult {
             prs: prs::cached_status(daemon, &params.workspace).await?,
+        }),
+        ClientCall::PrOverview(_) => to_value(PrOverviewResult {
+            workspaces: prs::overview(daemon).await?,
         }),
         ClientCall::PrMerge(params) => to_value(MergePrsResult {
             outcomes: prs::merge(daemon, &params).await?,

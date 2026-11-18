@@ -1706,6 +1706,28 @@ async fn the_fonts_are_kept_in_the_appearance_table() {
     assert!(!settings.appearance.theme_interface);
     let text = std::fs::read_to_string(d.settings.path()).unwrap();
     assert!(!text.contains("theme_interface"), "{text}");
+
+    // The sidebar shows no pull requests until the user asks for them.
+    assert!(!settings.appearance.sidebar_pr_status);
+    let sidebar_prs = |on: bool| {
+        fonts(AppearanceUpdate {
+            sidebar_pr_status: Some(on),
+            ..Default::default()
+        })
+    };
+    let settings = chauffeurd::preferences::set(d, sidebar_prs(true))
+        .await
+        .unwrap();
+    assert!(settings.appearance.sidebar_pr_status);
+    let text = std::fs::read_to_string(d.settings.path()).unwrap();
+    assert!(text.contains("sidebar_pr_status = true"), "{text}");
+    let settings = chauffeurd::preferences::set(d, sidebar_prs(false))
+        .await
+        .unwrap();
+    assert!(!settings.appearance.sidebar_pr_status);
+    let text = std::fs::read_to_string(d.settings.path()).unwrap();
+    assert!(!text.contains("sidebar_pr_status"), "{text}");
+
     std::fs::write(&theme, "background #000000\n").unwrap();
     let settings = chauffeurd::preferences::get(d).await.unwrap();
     assert!(settings.appearance.palette.is_none());

@@ -23,6 +23,11 @@ terminal_theme: string,
  */
 theme_interface: boolean, 
 /**
+ * The sidebar shows each workspace's pull request status beside its activity (off unless
+ * `sidebar_pr_status = true`).
+ */
+sidebar_pr_status: boolean, 
+/**
  * The theme's colours, read now: the terminal's, and the code's from its 16 ANSI colours.
  */
 palette: Palette | null, 

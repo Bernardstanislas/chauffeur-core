@@ -49,6 +49,15 @@ pub async fn list(env: &ShellEnv, clone: &Path, head: &str, state: &str) -> Opti
     }
 }
 
+/// The project's open merge requests, in `list`'s shape; their pipelines are not in it.
+pub async fn open(env: &ShellEnv, clone: &Path) -> Option<Vec<Value>> {
+    let path = "projects/:id/merge_requests?state=opened&per_page=100";
+    match api(env, clone, path).await? {
+        Value::Array(mrs) => Some(mrs.iter().map(as_pull_request).collect()),
+        _ => None,
+    }
+}
+
 /// The checks of a merge request, its head pipeline's state as GitHub's rollup reads it; none
 /// without a pipeline, or when glab fails.
 pub async fn checks(env: &ShellEnv, clone: &Path, number: u64) -> Value {

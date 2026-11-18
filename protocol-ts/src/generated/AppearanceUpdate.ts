@@ -7,4 +7,4 @@ export type AppearanceUpdate = { interface_font?: string, code_font?: string, co
 /**
  * The theme file's path; empty for the app's own colours.
  */
-terminal_theme?: string, theme_interface?: boolean, };
+terminal_theme?: string, theme_interface?: boolean, sidebar_pr_status?: boolean, };

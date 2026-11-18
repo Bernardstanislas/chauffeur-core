@@ -990,6 +990,15 @@ function AppearanceSection({ settings, update, busy }: SectionProps) {
         onChange={(on) => void update({ appearance: { theme_interface: on } })}
         testId="theme-interface"
       />
+      <Heading title="Sidebar" />
+      <Switch
+        label="Show pull request status in the sidebar"
+        hint="Each workspace's pull requests beside its activity: checks, review, merged. Read from GitHub every 30 seconds; also sidebar_pr_status in the [appearance] table of settings.toml."
+        on={a.sidebar_pr_status}
+        disabled={busy}
+        onChange={(on) => void update({ appearance: { sidebar_pr_status: on } })}
+        testId="sidebar-pr-status"
+      />
     </>
   );
 }

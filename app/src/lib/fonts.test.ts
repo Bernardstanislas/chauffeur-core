@@ -19,7 +19,7 @@ describe("fonts", () => {
 
   test("the terminal keeps its own until the user picks", () => {
     expect(terminalFont(null)).toEqual({ fontFamily: DEFAULT_MONO, fontSize: 12 });
-    const picked = { interface_font: "", code_font: "", code_size: 0, terminal_font: "Fira Code", terminal_size: 14, terminal_theme: "", theme_interface: false, palette: null, palette_error: null };
+    const picked = { interface_font: "", code_font: "", code_size: 0, terminal_font: "Fira Code", terminal_size: 14, terminal_theme: "", theme_interface: false, sidebar_pr_status: false, palette: null, palette_error: null };
     expect(terminalFont(picked)).toEqual({ fontFamily: `"Fira Code", ${DEFAULT_MONO}`, fontSize: 14 });
   });
 });
