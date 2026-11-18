@@ -212,6 +212,13 @@ fn merged_settings(config: &WorkspaceConfig, warnings: &mut Vec<String>) -> anyh
     let mut deny: Vec<Value> = Vec::new();
     let mut ask: Vec<Value> = Vec::new();
     for repo in config.repos {
+        // The repo's folder under the root; a repo elsewhere keeps its rules as written.
+        let folder = repo
+            .path
+            .strip_prefix(config.root)
+            .ok()
+            .map(|folder| folder.display().to_string())
+            .filter(|folder| !folder.is_empty());
         for file in [".claude/settings.json", ".claude/settings.local.json"] {
             let Some(settings) = read_json(&repo.path.join(file)) else {
                 continue;
@@ -251,8 +258,12 @@ fn merged_settings(config: &WorkspaceConfig, warnings: &mut Vec<String>) -> anyh
                         .into_iter()
                         .flatten()
                     {
-                        if !list.contains(rule) {
-                            list.push(rule.clone());
+                        let rule = folder.as_deref().map_or_else(
+                            || rule.clone(),
+                            |folder| anchor_rule_at_repo(rule, key, folder),
+                        );
+                        if !list.contains(&rule) {
+                            list.push(rule);
                         }
                     }
                 }
@@ -281,6 +292,53 @@ fn merged_settings(config: &WorkspaceConfig, warnings: &mut Vec<String>) -> anyh
         );
     }
     Ok(Value::Object(out))
+}
+
+/// Claude Code resolves the path of a `Read(…)` or `Edit(…)` rule (the only rules with paths)
+/// from the session's working directory: a `/src/**` path is anchored there. A path without a
+/// leading `/` (`./` aside) is read as in a `.gitignore`: anchored there too when a `/` is left
+/// before its end (`src/**`), at any depth below it otherwise (`*.ts`, `dist/`); a deny or ask
+/// rule's `src/**` also blocks every `src` folder. A deny or ask rule starting with `!` carves its
+/// paths out of the relative rules listed before it. A repo's rules were written for a session
+/// started in the repo; merged here, at the workspace root, the anchored ones would miss the repo
+/// and the others would reach every repo. They are rewritten to keep their reach inside the repo's
+/// `folder`: `/src/**` becomes `/web/src/**`, an allow `*.ts` becomes `/web/**/*.ts`, a deny
+/// `*.env` becomes `web/**/*.env` (relative, at least as wide as in the repo, so that a `!` rule
+/// can still carve out of it) and `!sample.env` becomes `!web/**/sample.env`. Absolute (`//`) and
+/// home (`~`) paths, and rules without a path, are kept.
+fn anchor_rule_at_repo(rule: &Value, kind: &str, folder: &str) -> Value {
+    let Some((tool, path)) = rule
+        .as_str()
+        .and_then(|text| text.strip_suffix(')'))
+        .and_then(|text| text.split_once('('))
+        .filter(|(tool, _)| matches!(*tool, "Read" | "Edit"))
+    else {
+        return rule.clone();
+    };
+    let (negated, path) = path
+        .strip_prefix('!')
+        .map_or((false, path), |path| (true, path));
+    if path.starts_with("//") || path.starts_with('~') {
+        return rule.clone();
+    }
+    if let Some(path) = path.strip_prefix('/').filter(|_| !negated) {
+        return json!(format!("{tool}(/{folder}/{path})"));
+    }
+    let (path, anchored) = match path.strip_prefix('/') {
+        Some(path) => (path, true),
+        None => {
+            let path = path.strip_prefix("./").unwrap_or(path);
+            (path, path.trim_end_matches('/').contains('/'))
+        }
+    };
+    let rewritten = match (negated, kind == "allow", anchored) {
+        (true, _, true) => format!("!{folder}/{path}"),
+        (true, _, false) => format!("!{folder}/**/{path}"),
+        (false, true, true) => format!("/{folder}/{path}"),
+        (false, true, false) => format!("/{folder}/**/{path}"),
+        (false, false, _) => format!("{folder}/**/{path}"),
+    };
+    json!(format!("{tool}({rewritten})"))
 }
 
 /// Rewrites a repo's hook group so its command hooks run in the repo, and only for files of the
@@ -404,6 +462,93 @@ mod tests {
         assert!(claude_md.contains("Skills written for plain git"));
         let agents_md = std::fs::read_to_string(root.path().join("AGENTS.md")).unwrap();
         assert!(agents_md.contains("# ecom"));
+    }
+
+    #[test]
+    fn a_repos_relative_rules_keep_pointing_into_the_repo_once_merged() {
+        let root = tempfile::tempdir().unwrap();
+        let web = root.path().join("web");
+        let api = root.path().join("api");
+        for (repo, rules) in [
+            (
+                &web,
+                r#"{"allow":["Edit(/src/**)","Read(//etc/hosts)","Read(~/notes/**)","Edit(lib/**)",
+                    "Read(./docs/**)","Edit(*.ts)","Edit(./*.md)","Edit(dist/)",
+                    "Bash(pnpm test *)","WebFetch","mcp__linear"],
+                   "ask":["Read(/config/*.json)","Read(config/**)"],
+                   "deny":["Edit(/secrets/**)","Edit(./secrets/**)","Read(*.env)","Read(!sample.env)",
+                    "Read(!/local.env)","Read(!config/test.env)","Read(!~/x.env)"]}"#,
+            ),
+            (
+                &api,
+                r#"{"allow":["Edit(*.ts)"],"deny":["Edit(/secrets/**)"]}"#,
+            ),
+        ] {
+            std::fs::create_dir_all(repo.join(".claude")).unwrap();
+            std::fs::write(
+                repo.join(".claude/settings.json"),
+                format!(r#"{{"permissions":{rules}}}"#),
+            )
+            .unwrap();
+        }
+        let repos = [&web, &api].map(|path| RepoEntry {
+            repo: path.file_name().unwrap().to_string_lossy().into_owned(),
+            path: path.clone(),
+            base_branch: "main".into(),
+        });
+        write(&WorkspaceConfig {
+            slug: "xyz-1-x",
+            branch: "alice/xyz-1-x",
+            root: root.path(),
+            repos: &repos,
+            tickets: &[],
+            port_base: 41000,
+            port_count: 10,
+            parent_slug: None,
+            cli: Path::new("/opt/chauffeur"),
+            explore: false,
+        })
+        .unwrap();
+
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.path().join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        let permissions = &settings["permissions"];
+        assert_eq!(
+            permissions["allow"],
+            json!([
+                "Edit(/web/src/**)",
+                "Read(//etc/hosts)",
+                "Read(~/notes/**)",
+                "Edit(/web/lib/**)",
+                "Read(/web/docs/**)",
+                "Edit(/web/**/*.ts)",
+                "Edit(/web/**/*.md)",
+                "Edit(/web/**/dist/)",
+                "Bash(pnpm test *)",
+                "WebFetch",
+                "mcp__linear",
+                "Edit(/api/**/*.ts)"
+            ])
+        );
+        assert_eq!(
+            permissions["ask"],
+            json!(["Read(/web/config/*.json)", "Read(web/**/config/**)"])
+        );
+        assert_eq!(
+            permissions["deny"],
+            json!([
+                "Edit(/web/secrets/**)",
+                "Edit(web/**/secrets/**)",
+                "Read(web/**/*.env)",
+                "Read(!web/**/sample.env)",
+                "Read(!web/local.env)",
+                "Read(!web/config/test.env)",
+                "Read(!~/x.env)",
+                "Edit(/api/secrets/**)"
+            ])
+        );
     }
 
     #[test]
