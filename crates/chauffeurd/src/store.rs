@@ -2398,6 +2398,17 @@ impl Store {
         Ok(())
     }
 
+    /// Adds or updates one repo of the cache: one just created, before GitHub lists it again.
+    pub fn cache_repo(&self, repo: &CachedRepo) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT OR REPLACE INTO github_repos (full_name, name, owner_is_org, private, default_branch, description, pushed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![repo.full_name, repo.name, repo.owner_is_org, repo.private, repo.default_branch, repo.description, repo.pushed_at],
+            )?;
+            Ok(())
+        })
+    }
+
     /// When a workspace last took in each clone (its worktrees made with the workspace or added
     /// to it, not the agents'), by clone path.
     pub fn last_use_by_clone(&self) -> Result<std::collections::HashMap<String, String>> {

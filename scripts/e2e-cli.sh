@@ -336,6 +336,7 @@ case "\$1 \$2" in
     echo '{"name":"blog","full_name":"octocat/blog","private":true,"owner_type":"User","default_branch":"main","description":"Mine","pushed_at":"2026-11-01T00:00:00Z"}'
     echo '{"name":"alpha","full_name":"someorg/alpha","private":false,"owner_type":"Organization","default_branch":"main","description":null,"pushed_at":null}' ;;
   "repo clone") git clone -q "$T/origin/alpha.git" "\$4" ;;
+  "repo create") echo "\$*" >> "$T/created.log" ;;
   "pr edit") echo "edit \$3 \$4 \$5" >> "$T/merges.log" ;;
   "pr merge") echo "\$(basename "\$PWD") \$3 \$4" >> "$T/merges.log" ;;
   # A newer release, once the update step below published one in $T/release.
@@ -376,6 +377,16 @@ sqlite3 "$CHAUFFEUR_HOME/chauffeur.db" "delete from github_repos"
 c new --name e2e-upgrade --repo blog >/dev/null
 c --json show e2e-upgrade | python3 -c 'import sys,json; w=json.load(sys.stdin); assert [t["repo"] for t in w["worktrees"]] == ["blog"], w'
 c archive e2e-upgrade --force >/dev/null
+echo "== repos. a repo created on GitHub is listed at once, refused twice, and a workspace clones it"
+c repos create octocat/fresh --description "A new one" >/dev/null
+test "$(cat "$T/created.log")" = "repo create octocat/fresh --add-readme --private --description A new one"
+c --json repos | python3 -c 'import sys,json; r={r["key"]: r for r in json.load(sys.stdin)["repos"]}["octocat/fresh"]; assert r["private"] and not r["owner_is_org"] and r["description"] == "A new one", r'
+if c repos create octocat/fresh > "$T/again.out" 2>&1; then exit 1; fi
+grep -q "already exists" "$T/again.out"
+test "$(wc -l < "$T/created.log")" -eq 1
+c new --name e2e-fresh --repo octocat/fresh >/dev/null
+test -d "$CHAUFFEUR_REPOS_DIR/octocat/fresh/.git"
+c archive e2e-fresh --force >/dev/null
 mv "$CHAUFFEUR_HOME/settings.toml.bak" "$CHAUFFEUR_HOME/settings.toml"
 sleep 1.5
 c new --name e2e-prs >/dev/null

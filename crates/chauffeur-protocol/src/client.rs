@@ -345,6 +345,12 @@ methods! {
         #[access(Any)]
         #[relay(Local)]
         ReposPage(ReposPageParams) -> ReposPageResult,
+        /// Creates a repo on GitHub, with a README so that it has a first commit to branch from,
+        /// and returns it as the picker lists it, to add to a workspace (cloned on first use).
+        #[serde(rename = "repos.create")]
+        #[access(User)]
+        #[relay(Local)]
+        ReposCreate(CreateRepoParams) -> RepoInfo,
         #[serde(rename = "workspace.create")]
         #[access(Any, phone)]
         #[relay(Local)]
@@ -1525,6 +1531,18 @@ pub struct ReposPageParams {
     pub cursor: Option<String>,
     #[serde(default)]
     pub refresh: bool,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[ts(export)]
+#[ts(optional_fields)]
+pub struct CreateRepoParams {
+    /// The account or one of its organizations.
+    pub owner: String,
+    pub name: String,
+    pub private: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]

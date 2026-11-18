@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
+use chauffeur_protocol::client::CreateRepoParams;
 use chauffeur_protocol::model::RepoInfo;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -292,6 +293,56 @@ impl RepoRegistry {
             pushed_at: repo.pushed_at,
             last_used: None,
         }
+    }
+
+    /// Creates `owner/name` on GitHub with a README (a worktree needs a commit to branch from)
+    /// and caches it, so that the picker lists it and a workspace clones it on first use.
+    /// `account` is the login `gh` is signed in to: another owner is one of its organizations.
+    /// A repo the cache or a clone already knows is refused before GitHub is asked; one only GitHub
+    /// knows is refused by it, also as a `Conflict`.
+    pub async fn create(
+        &self,
+        params: CreateRepoParams,
+        account: Option<&str>,
+        env: &ShellEnv,
+    ) -> Result<RepoInfo> {
+        validate_owner(&params.owner)?;
+        validate_repo_name(&params.name)?;
+        let full_name = format!("{}/{}", params.owner, params.name);
+        let settings = self.settings.get();
+        if self
+            .cached(&settings)?
+            .iter()
+            .any(|repo| repo.full_name.eq_ignore_ascii_case(&full_name))
+        {
+            return Err(Error::Conflict(format!(
+                "{full_name} already exists: pick it from the list, or choose another name"
+            )));
+        }
+        if let Some(clone) = self.existing_clone(&full_name) {
+            return Err(Error::Conflict(format!(
+                "a clone named {} is already at {}: choose another name",
+                params.name,
+                clone.display()
+            )));
+        }
+        let description = params
+            .description
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty());
+        create_on_github(&full_name, params.private, description.as_deref(), env).await?;
+        let repo = CachedRepo {
+            name: params.name,
+            owner_is_org: is_main(&settings, &params.owner)
+                || account.is_some_and(|login| !login.eq_ignore_ascii_case(&params.owner)),
+            full_name,
+            private: params.private,
+            default_branch: None,
+            description,
+            pushed_at: Some(crate::store::now()),
+        };
+        self.store.cache_repo(&repo)?;
+        Ok(self.repo_info(repo, &settings))
     }
 
     /// Names of every repo known from the main organization's cache and the settings.
@@ -786,6 +837,49 @@ async fn fetch_account_repos(env: &ShellEnv) -> anyhow::Result<Vec<CachedRepo>> 
         .collect()
 }
 
+async fn create_on_github(
+    full_name: &str,
+    private: bool,
+    description: Option<&str>,
+    env: &ShellEnv,
+) -> Result<()> {
+    let mut command = Command::new("gh");
+    command
+        .args(["repo", "create", full_name, "--add-readme"])
+        .arg(if private { "--private" } else { "--public" });
+    if let Some(description) = description {
+        command.args(["--description", description]);
+    }
+    let output = command
+        .env_clear()
+        .envs(env.vars())
+        .env("GH_PROMPT_DISABLED", "1")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => Error::Unavailable(format!(
+                "could not create {full_name}: {}",
+                crate::github::NOT_CONNECTED
+            )),
+            _ => anyhow::Error::from(error)
+                .context("running gh repo create")
+                .into(),
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = format!("could not create {full_name} on GitHub: {}", stderr.trim());
+        // A name taken on GitHub (a repo the cache does not list yet) is the client's to change,
+        // like one the cache knows; anything else is GitHub's or gh's.
+        return Err(if stderr.contains("already exists") {
+            Error::Conflict(message)
+        } else {
+            Error::Unavailable(message)
+        });
+    }
+    Ok(())
+}
+
 async fn clone_repo(full_name: &str, target: &Path, env: &ShellEnv) -> Result<()> {
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1098,5 +1192,127 @@ mod tests {
         // Asked again without a refresh, the failure is still told until a listing succeeds.
         let again = registry.listing(false, &env).await.unwrap();
         assert!(again.github_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_created_repo_is_listed_at_once_and_one_that_exists_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (registry, settings) = registry(dir.path(), &[cached("someone/blog")]);
+        settings
+            .update(|doc| doc["github_org"] = toml_edit::value("example"))
+            .unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let gh = bin.join("gh");
+        let log = dir.path().join("gh.log");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$3\" in *taken*) echo 'Name already exists on this account' >&2; exit 1;; esac\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = ShellEnv::new();
+        env.set_vars(BTreeMap::from([(
+            "PATH".to_string(),
+            format!("{}:/usr/bin:/bin", bin.display()),
+        )]));
+        let params =
+            |owner: &str, name: &str, private: bool, description: Option<&str>| CreateRepoParams {
+                owner: owner.into(),
+                name: name.into(),
+                private,
+                description: description.map(Into::into),
+            };
+
+        let mine = registry
+            .create(
+                params("someone", "fresh", true, Some(" A new app ")),
+                Some("someone"),
+                &env,
+            )
+            .await
+            .unwrap();
+        assert_eq!(mine.key, "someone/fresh");
+        assert!(mine.private && !mine.owner_is_org);
+        assert_eq!(mine.description.as_deref(), Some("A new app"));
+        let org = registry
+            .create(
+                params("example", "tool", false, None),
+                Some("someone"),
+                &env,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            org.key, "tool",
+            "the main organization's repo is named short"
+        );
+        assert!(org.owner_is_org && !org.private);
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "repo create someone/fresh --add-readme --private --description A new app\n\
+             repo create example/tool --add-readme --public\n"
+        );
+        let keys: Vec<String> = registry
+            .picker_listing()
+            .unwrap()
+            .repos
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        assert!(
+            keys.contains(&"someone/fresh".to_string()) && keys.contains(&"tool".to_string()),
+            "{keys:?}"
+        );
+
+        for existing in ["someone/BLOG", "someone/fresh"] {
+            let (owner, name) = existing.split_once('/').unwrap();
+            let refused = registry
+                .create(params(owner, name, true, None), Some("someone"), &env)
+                .await;
+            assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
+        }
+        let clone = dir.path().join("repos").join("local-only");
+        git_repo(&clone, "");
+        let refused = registry
+            .create(params("example", "local-only", true, None), None, &env)
+            .await;
+        assert!(matches!(refused, Err(Error::Conflict(_))), "{refused:?}");
+        assert!(matches!(
+            registry
+                .create(params("some one", "x", true, None), None, &env)
+                .await,
+            Err(Error::BadRequest(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+
+        // A name only GitHub knows is refused by it, as a conflict too.
+        let Err(Error::Conflict(error)) = registry
+            .create(params("someone", "taken", true, None), None, &env)
+            .await
+        else {
+            panic!("GitHub's refusal is told");
+        };
+        assert!(error.contains("Name already exists"), "{error}");
+        let org = registry
+            .create(params("example", "unknown-account", true, None), None, &env)
+            .await
+            .unwrap();
+        assert!(
+            org.owner_is_org,
+            "the main organization is one, whatever gh says of the account"
+        );
+        assert!(
+            !registry
+                .cached_listing()
+                .unwrap()
+                .repos
+                .iter()
+                .any(|r| r.name == "taken")
+        );
     }
 }

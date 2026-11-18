@@ -214,6 +214,15 @@ async fn handle_other(daemon: &Arc<Daemon>, call: ClientCall) -> Result<Value> {
         ClientCall::ReposPage(params) => {
             to_value(daemon.repos.page(params, &daemon.shell_env).await?)
         }
+        ClientCall::ReposCreate(params) => {
+            let account = daemon.github.status().await.account;
+            to_value(
+                daemon
+                    .repos
+                    .create(params, account.as_deref(), &daemon.shell_env)
+                    .await?,
+            )
+        }
         ClientCall::WorkspaceCreate(params) => to_value(daemon.workspaces.create(params).await?),
         ClientCall::WorkspaceList(params) => to_value(WorkspacesResult {
             workspaces: daemon
