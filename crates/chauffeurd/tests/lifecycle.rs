@@ -2938,6 +2938,82 @@ async fn claude_sessions_are_given_their_repos_clones_to_read_their_memories_the
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_chats_are_given_the_clones_local_allow_rules_as_they_are_at_session_start() {
+    use chauffeur_protocol::model::ChatKind;
+
+    let f = fixture(47450);
+    let d = &f.daemon;
+    let log = f.root.join("sidecar.log");
+    d.chats.sidecar.use_binary(fake_sidecar(&f.root, &log));
+    let clone = PathBuf::from(d.settings.get().repos["repo-b"].path.clone().unwrap());
+    let local = |rules: &str| {
+        std::fs::create_dir_all(clone.join(".claude")).unwrap();
+        std::fs::write(
+            clone.join(".claude/settings.local.json"),
+            format!(r#"{{"permissions":{{"allow":{rules}}}}}"#),
+        )
+        .unwrap();
+    };
+    local(r#"["Bash(make)"]"#);
+    let mut created = Vec::new();
+    for explore in [false, true] {
+        let ws = d
+            .workspaces
+            .create(CreateWorkspaceParams {
+                repos: vec!["repo-b".into()],
+                explore,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .workspace;
+        created.push(ws.id);
+    }
+    local(r#"["Bash(make)","Bash(lint)"]"#);
+    let (workspace, exploration) = (&created[0], &created[1]);
+    for (ws, agent, kind, granted) in [
+        (workspace, AgentKind::Claude, ChatKind::Chat, true),
+        (workspace, AgentKind::Claude, ChatKind::Design, false),
+        (workspace, AgentKind::Codex, ChatKind::Chat, false),
+        (exploration, AgentKind::Claude, ChatKind::Chat, false),
+    ] {
+        let chat = d
+            .chats
+            .create(CreateChatParams {
+                workspace: ws.clone(),
+                agent: Some(agent),
+                model: None,
+                effort: None,
+                fast: None,
+                permission_mode: None,
+                prompt: None,
+                images: None,
+                title: None,
+                kind: Some(kind),
+                source_chat: None,
+            })
+            .await
+            .unwrap();
+        d.chats.send(&chat.id, "Run make").await.unwrap();
+        let start: serde_json::Value = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|call| call["method"] == "session.start" && call["params"]["chat_id"] == chat.id)
+            .unwrap();
+        let rules = &start["params"]["local_allow"];
+        match granted {
+            true => assert_eq!(
+                rules,
+                &serde_json::json!(["Bash(make)", "Bash(lint)"]),
+                "{start}"
+            ),
+            false => assert!(rules.is_null(), "{start}"),
+        }
+    }
+}
+
 async fn new_chat(d: &Daemon, workspace: &str) -> chauffeur_protocol::model::ChatInfo {
     d.chats
         .create(CreateChatParams {
