@@ -7,6 +7,7 @@ import { CHAUFFEUR_TOOL_RULES, plansDirectory } from "../src/agents/claude/optio
 import { ClaudeSession } from "../src/agents/claude/session.ts";
 import { ErrorCode, type SessionStartParams } from "../src/protocol.ts";
 import { RpcError } from "../src/rpc/peer.ts";
+import { appended, memoryDir } from "./support/claude-options.ts";
 import { FakeHost, FakeQuery, flush, sdk } from "./support/fakes.ts";
 
 const PLANS = "/workspaces/ws-1/.chauffeur/plans";
@@ -316,8 +317,22 @@ describe("starting", () => {
     expect(fixture.host.events).toEqual([]);
   });
 
+  test("hands the memories of the workspace's clones to the agent's options", async () => {
+    const config = realpathSync(mkdtempSync(join(tmpdir(), "memories-")));
+    try {
+      const api = join(config, "code", "api");
+      mkdirSync(api, { recursive: true });
+      mkdirSync(memoryDir(config, api), { recursive: true });
+      writeFileSync(join(memoryDir(config, api), "MEMORY.md"), "- api note\n");
+      const { query } = await started({ memory_clones: [join(config, "code", "web"), api], env: { ...BASE.env, CLAUDE_CONFIG_DIR: config } });
+      expect(appended(query.options)).toContain(`\`${api}\`: \`${memoryDir(config, api)}\``);
+    } finally {
+      rmSync(config, { recursive: true, force: true });
+    }
+  });
+
   test("a stop while the clone's memory is read starts no agent", async () => {
-    const fixture = await started({ memory_clone: "/no/such/clone" }, { initialized: false });
+    const fixture = await started({ memory_clones: ["/no/such/clone"] }, { initialized: false });
     const start = fixture.session.start();
     await fixture.session.stop();
     await expect(start).rejects.toMatchObject({ code: ErrorCode.UNAVAILABLE, message: "the session was stopped while starting" });
