@@ -1653,8 +1653,9 @@ impl WorkspaceManager {
                 let lock = d.repos.lock_for(&repo.clone_path);
                 let _guard = lock.lock().await;
                 self.progress(&row.id, format!("fetching {}", repo.name));
+                let remote = git.base_remote(&repo.clone_path).await;
                 if git
-                    .fetch(&repo.clone_path, &repo.default_branch)
+                    .fetch(&repo.clone_path, &remote, &repo.default_branch)
                     .await
                     .is_ok()
                 {
@@ -1746,9 +1747,13 @@ impl WorkspaceManager {
         };
         let lock = d.repos.lock_for(&repo.clone_path);
         let _guard = lock.lock().await;
+        let base_remote = git.base_remote(&repo.clone_path).await;
         if !self.fetched_lately(&repo.clone_path) {
             self.progress(&row.id, format!("fetching {}", repo.name));
-            match git.fetch(&repo.clone_path, &repo.default_branch).await {
+            match git
+                .fetch(&repo.clone_path, &base_remote, &repo.default_branch)
+                .await
+            {
                 Ok(_) => self.mark_fetched(&repo.clone_path),
                 Err(error) => self.warn(
                     &row.id,
@@ -1760,13 +1765,16 @@ impl WorkspaceManager {
             }
         }
         if row.explore {
-            return self.add_explore_worktree(row, &repo, path).await;
+            return self
+                .add_explore_worktree(row, &repo, &base_remote, path)
+                .await;
         }
         let start = match start {
             Some(start) => start,
-            // An existing remote branch (resuming a PR): start the local branch from it.
+            // An existing remote branch (resuming a PR): start the local branch from it, on
+            // origin, where branches are pushed (a fork's own).
             None if !git.branch_exists(&repo.clone_path, branch).await
-                && git.fetch(&repo.clone_path, branch).await.is_ok()
+                && git.fetch(&repo.clone_path, "origin", branch).await.is_ok()
                 && git
                     .rev_parse(&repo.clone_path, &format!("origin/{branch}"))
                     .await
@@ -1775,7 +1783,7 @@ impl WorkspaceManager {
                 format!("origin/{branch}")
             }
             None => {
-                let remote = format!("origin/{}", repo.default_branch);
+                let remote = format!("{base_remote}/{}", repo.default_branch);
                 if git.rev_parse(&repo.clone_path, &remote).await.is_ok() {
                     remote
                 } else {
@@ -1851,11 +1859,12 @@ impl WorkspaceManager {
         &self,
         row: &WorkspaceRow,
         repo: &ResolvedRepo,
+        base_remote: &str,
         path: &Path,
     ) -> Result<WorktreeRow> {
         let d = self.d();
         let git = self.git();
-        let remote = format!("origin/{}", repo.default_branch);
+        let remote = format!("{base_remote}/{}", repo.default_branch);
         let start = if git.rev_parse(&repo.clone_path, &remote).await.is_ok() {
             remote
         } else {
