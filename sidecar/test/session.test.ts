@@ -110,13 +110,23 @@ describe("starting", () => {
     }
   });
 
-  test("auto mode that Claude Code could not take says that the chat asks instead", async () => {
-    const make = async (permission_mode: SessionStartParams["permission_mode"], current: string) => {
+  test("auto mode that Claude Code could not take says that the chat asks instead, once", async () => {
+    const HAIKU = "claude-haiku-4-5-20251001";
+    const notice = {
+      type: "notice" as const,
+      level: "warning" as const,
+      message: `Auto mode is unavailable for this chat with ${HAIKU} (its model, plan or settings turn it off). Claude asks before acting instead, as in "Ask for permissions"`,
+    };
+    const fellBack = [{ type: "permission_mode_effective" as const, mode: "default" as const }, notice];
+    // `turns`: the modes Claude Code reports at each turn (its init says the mode asked, the status
+    // right after the one it runs in), each turn ended.
+    const make = async (permission_mode: SessionStartParams["permission_mode"], listed: boolean | undefined, turns: string[]) => {
       const host = new FakeHost();
-      const session = new ClaudeSession({ ...BASE, permission_mode, model: "claude-haiku-4-5-20251001" }, host, {
+      let query: FakeQuery | undefined;
+      const session = new ClaudeSession({ ...BASE, permission_mode, model: HAIKU }, host, {
         query: ({ prompt, options }) => {
-          const query = new FakeQuery(prompt, options);
-          query.initResult.current_permission_mode = current;
+          query = new FakeQuery(prompt, options);
+          if (listed !== undefined) query.initResult.models = [{ value: HAIKU, displayName: "Haiku 4.5", description: "", ...(listed ? { supportsAutoMode: true } : {}) }];
           return query;
         },
         resolveExecutable: () => undefined,
@@ -124,20 +134,24 @@ describe("starting", () => {
         initTimeoutMs: 200,
       });
       await session.start();
-      return host.events;
+      for (const mode of turns) {
+        query!.push({ type: "system", subtype: "init", session_id: "sess-1", model: HAIKU, permissionMode: permission_mode === "auto" ? "auto" : mode } as never);
+        query!.push({ type: "system", subtype: "status", status: null, permissionMode: mode, uuid: "u", session_id: "sess-1" } as never);
+        query!.push(sdk.result());
+        await flush();
+      }
+      return host.events.filter((event) => event.type === "notice" || event.type === "permission_mode_effective");
     };
-    expect(await make("auto", "default")).toEqual([
-      // The daemon shows the chat asking, rather than in auto mode.
-      { type: "permission_mode_effective", mode: "default" },
-      {
-        type: "notice",
-        level: "warning",
-        message:
-          'Auto mode is unavailable for this chat with claude-haiku-4-5-20251001 (its model, plan or settings turn it off). Claude asks before acting instead, as in "Ask for permissions"',
-      },
-    ]);
-    expect(await make("auto", "auto")).toEqual([]);
-    expect(await make("default", "default")).toEqual([]);
+    // The model listed without auto mode: said at start, never again, the mode shown kept.
+    expect(await make("auto", false, [])).toEqual(fellBack);
+    expect(await make("auto", false, ["default", "default"])).toEqual(fellBack);
+    // The plan or settings turn it off: the first turn runs in default.
+    expect(await make("auto", true, ["default", "default"])).toEqual(fellBack);
+    // Plan mode the agent enters is no fallback, at the first turn or later.
+    expect(await make("auto", true, ["plan"])).not.toContainEqual(notice);
+    expect(await make("auto", true, ["auto", "default"])).not.toContainEqual(notice);
+    expect(await make("auto", undefined, ["auto"])).toEqual([]);
+    expect(await make("default", false, ["default"])).toEqual([]);
   });
 
   test("an exploration plans, whatever its mode, cannot leave plan mode, and writes its plan to the notes", async () => {
@@ -942,14 +956,24 @@ describe("configure and stop", () => {
     expect(host.events.filter((e) => e.type === "notice")).toEqual([]);
   });
 
+  test("auto mode refused when the chat asks for it is said once, even in its first turn", async () => {
+    const { session, query, host } = await started({ permission_mode: "default", model: "claude-haiku-4-5-20251001" });
+    query.permissionModeErrors.auto = new Error("auto mode unavailable for this model");
+    await session.configure({ permissionMode: "auto" });
+    // The first turn's status then says default: already said.
+    query.push({ type: "system", subtype: "status", status: null, permissionMode: "default", uuid: "u1", session_id: "sess-1" } as never);
+    await flush();
+    expect(host.events.filter((event) => event.type === "notice")).toHaveLength(1);
+  });
+
   test("a design chat without auto mode accepts edits instead, and says so", async () => {
-    // At start: Claude Code took default; the session switches to acceptEdits before any turn.
+    // At start, before any turn: its model is listed without auto mode.
     const host = new FakeHost();
     let made: FakeQuery | undefined;
     const session = new ClaudeSession({ ...BASE, cwd: DESIGN, design_dir: DESIGN, model: "claude-haiku-4-5-20251001" }, host, {
       query: ({ prompt, options }) => {
         made = new FakeQuery(prompt, options);
-        made.initResult.current_permission_mode = "default";
+        made.initResult.models = [{ value: "claude-haiku-4-5-20251001", displayName: "Haiku 4.5", description: "" }];
         return made;
       },
       resolveExecutable: () => undefined,
@@ -958,7 +982,7 @@ describe("configure and stop", () => {
     });
     await session.start();
     expect(made?.calls).toEqual(["setPermissionMode:acceptEdits"]);
-    expect(host.events).toEqual([
+    expect(host.events.filter((event) => event.type !== "session_started")).toEqual([
       { type: "permission_mode_effective", mode: "default" },
       { type: "permission_mode_effective", mode: "accept_edits" },
       {
