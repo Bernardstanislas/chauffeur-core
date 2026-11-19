@@ -1203,7 +1203,7 @@ async fn an_exploration_checks_out_the_base_branches_and_changes_nothing() {
         .unwrap();
     assert_eq!(b.branch, "");
 
-    // Archive: no archive script, no snapshot, nothing left; it cannot be restored.
+    // Archive: no archive script, no snapshot, nothing left.
     let archived = d.workspaces.archive(&ws.slug, false).await.unwrap();
     assert_eq!(archived.state, WorkspaceState::Archived);
     assert!(!PathBuf::from(&ws.path).exists());
@@ -1212,7 +1212,9 @@ async fn an_exploration_checks_out_the_base_branches_and_changes_nothing() {
         "no archive script"
     );
     assert_eq!(git(&clone_a, &["for-each-ref", "refs/chauffeur"]), "");
-    assert!(d.workspaces.restore(&ws.slug).await.is_err());
+    // Reactivated, it leaves the clone on its own branch.
+    let back = d.workspaces.restore(&ws.slug).await.unwrap();
+    assert_eq!(back.state, WorkspaceState::Ready, "{:?}", back.last_error);
     assert_eq!(git(&clone_a, &["branch", "--show-current"]), "local-work");
 }
 
@@ -3055,6 +3057,244 @@ async fn a_repo_whose_clone_memory_is_turned_off_is_left_out_the_next_one_loaded
         serde_json::json!([clone_a]),
         "{start}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archived_exploration_is_reactivated_on_its_base_branch_as_it_is_now() {
+    use chauffeur_protocol::model::ChatStatus;
+
+    let f = fixture(47470);
+    let d = &f.daemon;
+    let ws = d
+        .workspaces
+        .create(CreateWorkspaceParams {
+            name: Some("look".into()),
+            repos: vec!["repo-a".into()],
+            explore: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace;
+    let root = PathBuf::from(&ws.path);
+    let checkout = root.join("repo-a");
+    std::fs::write(root.join(".chauffeur/findings.md"), "a finding\n").unwrap();
+    let chat = new_chat(d, &ws.id).await;
+    let at_archive = git(&checkout, &["rev-parse", "HEAD"]).trim().to_string();
+    // A checkout removed by hand: still registered in the clone.
+    std::fs::remove_dir_all(&checkout).unwrap();
+    d.workspaces.archive(&ws.slug, false).await.unwrap();
+    eventually("the exploration to be archived", || {
+        d.workspaces.get(&ws.id).unwrap().state == WorkspaceState::Archived
+    })
+    .await;
+    assert!(!checkout.exists());
+
+    // Its base branch moves on while it is archived.
+    git(&f.root, &["clone", "-q", "origin/repo-a.git", "pusher"]);
+    let pusher = f.root.join("pusher");
+    std::fs::write(pusher.join("later.txt"), "later\n").unwrap();
+    git(&pusher, &["add", "later.txt"]);
+    git(&pusher, &["commit", "-q", "-m", "later work"]);
+    git(&pusher, &["push", "-q", "origin", "HEAD:main"]);
+    let now = git(&pusher, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let restored = d.workspaces.restore(&ws.slug).await.unwrap();
+    assert_eq!(
+        restored.state,
+        WorkspaceState::Ready,
+        "{:?}",
+        restored.last_error
+    );
+    assert!(restored.explore);
+    // The same folder, detached at the base branch as it is now.
+    assert_eq!(restored.path, ws.path);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]).trim(), now);
+    assert_eq!(
+        git(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "HEAD"
+    );
+    let worktrees: Vec<_> = restored.worktrees.iter().filter(|w| !w.removed).collect();
+    assert_eq!(worktrees.len(), 1, "{worktrees:?}");
+    assert_eq!(worktrees[0].base_commit.as_deref(), Some(now.as_str()));
+    assert_eq!(
+        std::fs::read_to_string(root.join(".chauffeur/findings.md")).unwrap(),
+        "a finding\n"
+    );
+    let chats = d.chats.list(&ws.id, false).unwrap();
+    let status = chats.iter().find(|c| c.id == chat.id).unwrap().status;
+    assert_eq!(status, ChatStatus::Idle);
+    // As a new exploration: no setup, no ports.
+    assert!(
+        d.procs
+            .list(&ws.id)
+            .iter()
+            .all(|p| p.kind != chauffeur_protocol::events::ProcessKind::Setup),
+        "{:?}",
+        d.procs.list(&ws.id)
+    );
+    assert_eq!(restored.port_count, 0);
+    // What the chats talked about, kept for their agents to be told what moved.
+    let kept: serde_json::Value = serde_json::from_str(
+        &d.store
+            .kv_get(&format!(
+                "{}{}",
+                chauffeurd::workspaces::REACTIVATION_KEY,
+                ws.id
+            ))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        kept["commits"][&worktrees[0].id],
+        serde_json::json!(at_archive)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reactivation_that_fails_leaves_the_exploration_to_reactivate_again_keeping_what_its_chats_saw()
+ {
+    let f = fixture(47480);
+    let d = &f.daemon;
+    let ws = d
+        .workspaces
+        .create(CreateWorkspaceParams {
+            name: Some("look".into()),
+            repos: vec!["repo-a".into(), "repo-b".into()],
+            explore: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace;
+    let root = PathBuf::from(&ws.path);
+    let saw: Vec<(String, Option<String>)> = ws
+        .worktrees
+        .iter()
+        .map(|w| (w.id.clone(), w.base_commit.clone()))
+        .collect();
+    d.workspaces.archive(&ws.slug, false).await.unwrap();
+    eventually("the exploration to be archived", || {
+        d.workspaces.get(&ws.id).unwrap().state == WorkspaceState::Archived
+    })
+    .await;
+
+    // Its folder cannot be made again (a file in its way): cleanup_failed, never creating.
+    std::fs::write(&root, "in the way").unwrap();
+    let blocked = d.workspaces.restore(&ws.slug).await.unwrap();
+    assert_eq!(blocked.state, WorkspaceState::CleanupFailed);
+    std::fs::remove_file(&root).unwrap();
+
+    // repo-a moves on, so that what its chats saw differs from where it comes back.
+    git(&f.root, &["clone", "-q", "origin/repo-a.git", "pusher"]);
+    let pusher = f.root.join("pusher");
+    std::fs::write(pusher.join("later.txt"), "later\n").unwrap();
+    git(&pusher, &["add", "later.txt"]);
+    git(&pusher, &["commit", "-q", "-m", "later work"]);
+    git(&pusher, &["push", "-q", "origin", "HEAD:main"]);
+
+    // One repo cannot be checked out: the other is back, and the message says what to do.
+    let clone_b = f.root.join("clones/repo-b");
+    let away = f.root.join("clones/repo-b-away");
+    std::fs::rename(&clone_b, &away).unwrap();
+    let failed = d.workspaces.restore(&ws.slug).await.unwrap();
+    assert_eq!(failed.state, WorkspaceState::CleanupFailed);
+    let error = failed.last_error.unwrap_or_default();
+    assert!(
+        error.starts_with("repo-b could not be checked out again (")
+            && error.ends_with("): restore the exploration again once it is fixed"),
+        "{error}"
+    );
+    assert!(root.join("repo-a").exists());
+
+    std::fs::rename(&away, &clone_b).unwrap();
+    let again = d.workspaces.restore(&ws.slug).await.unwrap();
+    assert_eq!(again.state, WorkspaceState::Ready, "{:?}", again.last_error);
+    assert!(root.join("repo-b").exists());
+    // What the chats saw, for every repo, though one came back a try later.
+    let kept: serde_json::Value = serde_json::from_str(
+        &d.store
+            .kv_get(&format!(
+                "{}{}",
+                chauffeurd::workspaces::REACTIVATION_KEY,
+                ws.id
+            ))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    for (id, commit) in saw {
+        assert_eq!(kept["commits"][&id], serde_json::json!(commit), "{kept}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkout_a_failed_archive_left_is_brought_up_to_date_and_the_record_is_new() {
+    let f = fixture(47490);
+    let d = &f.daemon;
+    let ws = d
+        .workspaces
+        .create(CreateWorkspaceParams {
+            name: Some("look".into()),
+            repos: vec!["repo-a".into()],
+            explore: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace;
+    let checkout = PathBuf::from(&ws.path).join("repo-a");
+    git(&f.root, &["clone", "-q", "origin/repo-a.git", "pusher"]);
+    let pusher = f.root.join("pusher");
+    let push = |name: &str| {
+        std::fs::write(pusher.join(name), "x\n").unwrap();
+        git(&pusher, &["add", name]);
+        git(&pusher, &["commit", "-q", "-m", name]);
+        git(&pusher, &["push", "-q", "origin", "HEAD:main"]);
+        git(&pusher, &["rev-parse", "HEAD"]).trim().to_string()
+    };
+    let record = || -> serde_json::Value {
+        serde_json::from_str(
+            &d.store
+                .kv_get(&format!(
+                    "{}{}",
+                    chauffeurd::workspaces::REACTIVATION_KEY,
+                    ws.id
+                ))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+
+    // A first archive and reactivation, which succeed.
+    d.workspaces.archive(&ws.slug, false).await.unwrap();
+    eventually("the exploration to be archived", || {
+        d.workspaces.get(&ws.id).unwrap().state == WorkspaceState::Archived
+    })
+    .await;
+    let first = push("first.txt");
+    assert_eq!(
+        d.workspaces.restore(&ws.slug).await.unwrap().state,
+        WorkspaceState::Ready
+    );
+    let id = d.workspaces.get(&ws.id).unwrap().worktrees[0].id.clone();
+
+    // An archive that failed, its checkout left in place, at `first`.
+    d.store
+        .set_workspace_state(
+            &ws.id,
+            WorkspaceState::CleanupFailed,
+            Some("archive failed"),
+        )
+        .unwrap();
+    let second = push("second.txt");
+    let back = d.workspaces.restore(&ws.slug).await.unwrap();
+    assert_eq!(back.state, WorkspaceState::Ready, "{:?}", back.last_error);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]).trim(), second);
+    // What the chats saw this time: `first`, not what the first reactivation kept.
+    assert_eq!(record()["commits"][&id], serde_json::json!(first));
 }
 
 async fn new_chat(d: &Daemon, workspace: &str) -> chauffeur_protocol::model::ChatInfo {

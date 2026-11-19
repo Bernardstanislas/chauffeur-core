@@ -78,8 +78,10 @@ function Header({ workspace, session }: { workspace: WorkspaceInfo; session: Wor
   const restore = async () => {
     setRestoring(true);
     try {
-      upsertWorkspace(await client.call("workspace.restore", { workspace: workspace.id }));
-      toast(`${workspaceName(workspace)} restored`);
+      const restored = await client.call("workspace.restore", { workspace: workspace.id });
+      upsertWorkspace(restored);
+      if (restored.state === "cleanup_failed") toast(`${workspaceName(workspace)}: ${restored.last_error ?? "it did not come back, see its log"}`, "error");
+      else toast(`${workspaceName(workspace)} restored`);
     } catch (error) {
       toast(`Could not restore: ${errorMessage(error)}`, "error");
     } finally {
@@ -157,7 +159,7 @@ function Header({ workspace, session }: { workspace: WorkspaceInfo; session: Wor
               <Archive size={12} /> Archive
             </Button>
           )}
-          {(workspace.state === "archived" || workspace.state === "cleanup_failed") && !workspace.explore && (
+          {(workspace.state === "archived" || workspace.state === "cleanup_failed") && (
             <Button size="sm" onClick={restore} busy={restoring} data-testid="restore">
               <ArchiveRestore size={12} /> Restore
             </Button>
@@ -192,7 +194,7 @@ function Header({ workspace, session }: { workspace: WorkspaceInfo; session: Wor
 
       {workspace.state === "archived" && (
         <p className="mt-2 text-[12px] text-muted" data-testid="archive-retention">
-          Conversations and notes remain available. {!workspace.explore && <>Snapshots follow the retention period in <button className="underline underline-offset-2" onClick={() => openSettings(true, "workspaces")}>Settings → Workspaces</button>.</>}
+          Conversations and notes remain available. {workspace.explore ? "Restore checks its repos out again at their base branch as it is now." : <>Snapshots follow the retention period in <button className="underline underline-offset-2" onClick={() => openSettings(true, "workspaces")}>Settings → Workspaces</button>.</>}
         </p>
       )}
 
