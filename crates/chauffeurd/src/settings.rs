@@ -406,6 +406,8 @@ pub struct AppearanceSettings {
     pub terminal_theme: String,
     /// The theme colours the interface too.
     pub theme_interface: bool,
+    /// Each workspace's pull request status in the sidebar.
+    pub sidebar_pr_status: bool,
 }
 
 /// `[repos.<name>]`: what the user sets for one repo on this machine, never in the repo.

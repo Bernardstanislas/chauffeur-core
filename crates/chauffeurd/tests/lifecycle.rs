@@ -1706,6 +1706,28 @@ async fn the_fonts_are_kept_in_the_appearance_table() {
     assert!(!settings.appearance.theme_interface);
     let text = std::fs::read_to_string(d.settings.path()).unwrap();
     assert!(!text.contains("theme_interface"), "{text}");
+
+    // The sidebar shows no pull requests until the user asks for them.
+    assert!(!settings.appearance.sidebar_pr_status);
+    let sidebar_prs = |on: bool| {
+        fonts(AppearanceUpdate {
+            sidebar_pr_status: Some(on),
+            ..Default::default()
+        })
+    };
+    let settings = chauffeurd::preferences::set(d, sidebar_prs(true))
+        .await
+        .unwrap();
+    assert!(settings.appearance.sidebar_pr_status);
+    let text = std::fs::read_to_string(d.settings.path()).unwrap();
+    assert!(text.contains("sidebar_pr_status = true"), "{text}");
+    let settings = chauffeurd::preferences::set(d, sidebar_prs(false))
+        .await
+        .unwrap();
+    assert!(!settings.appearance.sidebar_pr_status);
+    let text = std::fs::read_to_string(d.settings.path()).unwrap();
+    assert!(!text.contains("sidebar_pr_status"), "{text}");
+
     std::fs::write(&theme, "background #000000\n").unwrap();
     let settings = chauffeurd::preferences::get(d).await.unwrap();
     assert!(settings.appearance.palette.is_none());
@@ -5260,6 +5282,78 @@ esac"#,
         ("gitlab.example.com", "glpat-mac")
     );
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sidebar_shows_a_change_the_header_read_just_before() {
+    use serde_json::json;
+    let f = fixture(47670);
+    let d = &f.daemon;
+    // A fake `gh`: `pr list --head <head>` answers with `<repo>.head.json`, the open PRs of the
+    // repo with `<repo>.open.json`; an empty list without them.
+    let bin = f.root.join("bin");
+    let answers = f.root.join("gh-answers");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&answers).unwrap();
+    fake_tool(
+        &bin,
+        "gh",
+        &format!(
+            r#"repo=$(basename "$PWD")
+case "$1 $2 $3" in
+  "pr list --head") file="{answers}/$repo.head.json" ;;
+  "pr list --state") file="{answers}/$repo.open.json" ;;
+  *) exit 1 ;;
+esac
+if [ -f "$file" ]; then cat "$file"; else echo '[]'; fi"#,
+            answers = answers.display()
+        ),
+    );
+    let mut vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let path = format!("{}:{}", bin.display(), vars["PATH"]);
+    vars.insert("PATH".into(), path);
+    d.shell_env.set_vars(vars);
+    let ws = d
+        .workspaces
+        .create(CreateWorkspaceParams {
+            name: Some("checks".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace;
+    let checks = |conclusion: &str| {
+        let pr = json!([{
+            "number": 7, "baseRefName": "main", "url": "https://example.com/pull/7",
+            "state": "OPEN", "title": "Checks", "isDraft": false,
+            "statusCheckRollup": [{"conclusion": conclusion}],
+            "reviewDecision": "", "mergeable": "MERGEABLE",
+            "headRefName": "tester/checks", "isCrossRepository": false,
+        }]);
+        std::fs::write(answers.join("repo-a.head.json"), pr.to_string()).unwrap();
+        std::fs::write(answers.join("repo-a.open.json"), pr.to_string()).unwrap();
+    };
+    let shown = |prs: Vec<chauffeur_protocol::client::WorkspacePrs>| {
+        prs.into_iter()
+            .find(|w| w.workspace == ws.id)
+            .and_then(|w| w.prs.into_iter().find(|pr| pr.repo == "repo-a"))
+            .and_then(|pr| pr.checks)
+    };
+
+    checks("IN_PROGRESS");
+    let first = chauffeurd::prs::overview(d).await.unwrap();
+    assert_eq!(shown(first).as_deref(), Some("PENDING"));
+    // Past the overview's own freshness, the header reads the workspace, then its checks fail.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let header = chauffeurd::prs::cached_status(d, &ws.id).await.unwrap();
+    assert_eq!(header[0].checks.as_deref(), Some("PENDING"));
+    checks("FAILURE");
+    let next = chauffeurd::prs::overview(d).await.unwrap();
+    assert_eq!(
+        shown(next).as_deref(),
+        Some("FAILURE"),
+        "the header's read predates the change: the sidebar reads again"
+    );
 }
 
 /// The number of the PR the header shows for the workspace's own worktree of `repo`.

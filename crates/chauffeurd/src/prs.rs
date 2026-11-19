@@ -2,14 +2,17 @@
 //! (with `open-pr` and `shepherd-pr` skills when installed), merged by the user one repo after
 //! the other.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use std::time::{Duration, Instant};
 
-use chauffeur_protocol::client::{Forge, MergeMethod, MergeOutcome, MergePrsParams, PrInfo, PrRef};
+use chauffeur_protocol::client::{
+    Forge, MergeMethod, MergeOutcome, MergePrsParams, PrInfo, PrRef, WorkspacePrs,
+};
 use chauffeur_protocol::model::{WorkspaceState, WorktreeOrigin};
+use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::events::Activity;
@@ -47,6 +50,179 @@ pub async fn cached_status(daemon: &Arc<Daemon>, workspace: &str) -> Result<Vec<
 /// The next `cached_status` of the workspace reads it again.
 pub fn forget_status(workspace: &str) {
     status_cache().lock().unwrap().remove(workspace);
+}
+
+/// What `overview` last knew of a workspace: its PRs, when they were read, and the open PRs of its
+/// repos they were read against (`open_signature`).
+struct Known {
+    prs: Vec<PrInfo>,
+    open: String,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct Overview {
+    at: Option<Instant>,
+    known: HashMap<String, Known>,
+}
+
+/// A workspace is read again after this even when its open PRs look the same: a PR found under the
+/// name its branch was pushed under, or a merge GitHub lists late, may not show in them.
+const OVERVIEW_FULL: Duration = Duration::from_secs(300);
+/// Calls within this of the last one get its answer: several windows of the app ask together.
+const OVERVIEW_FRESH: Duration = Duration::from_secs(10);
+/// Workspaces read again in a round only because `OVERVIEW_FULL` passed: with a round every 20 s
+/// or so, 45 workspaces are each read every five minutes, more a little less often.
+const OVERVIEW_AGED: usize = 3;
+/// Workspaces read at once, each running git and `gh` in every worktree.
+const OVERVIEW_READS: usize = 4;
+
+/// `pr.overview`: every ready workspace's PRs, for the sidebar every few seconds. Reading each
+/// workspace every time would cost a `gh` or `glab` call per worktree and soon exhaust the user's
+/// API quota, so the open PRs of each repo are listed in one call, and only the workspaces whose open
+/// PRs changed (a PR opened, its checks, review or conflicts, a merge or a close) are read again.
+pub async fn overview(daemon: &Arc<Daemon>) -> Result<Vec<WorkspacePrs>> {
+    static STATE: OnceLock<tokio::sync::Mutex<Overview>> = OnceLock::new();
+    let mut state = STATE.get_or_init(Default::default).lock().await;
+    let rows: Vec<_> = daemon
+        .store
+        .list_workspaces()?
+        .into_iter()
+        .filter(|row| row.state == WorkspaceState::Ready && !row.explore)
+        .filter(|row| crate::cloud_transfer_driver::moved_to(daemon, &row.id).is_none())
+        .collect();
+    if !state.at.is_some_and(|at| at.elapsed() < OVERVIEW_FRESH) {
+        let mut worktrees = HashMap::new();
+        for row in &rows {
+            let mine: Vec<WorktreeRow> = daemon
+                .store
+                .worktrees_of(&row.id)?
+                .into_iter()
+                .filter(|w| !w.removed && !w.branch.is_empty())
+                .collect();
+            worktrees.insert(row.id.clone(), mine);
+        }
+        let clones: HashSet<&str> = worktrees
+            .values()
+            .flatten()
+            .map(|w| w.clone_path.as_str())
+            .collect();
+        let forge = daemon.settings.get().forge;
+        let listings: HashMap<String, Option<Vec<Value>>> =
+            futures_util::future::join_all(clones.into_iter().map(|clone| async move {
+                let prs = open_prs(forge, &daemon.shell_env, Path::new(clone)).await;
+                (clone.to_string(), prs)
+            }))
+            .await
+            .into_iter()
+            .collect();
+        let signatures = rows.iter().map(|row| {
+            let known = state.known.get(&row.id);
+            let open = open_signature(&worktrees[&row.id], known, &listings);
+            (row.id.clone(), open)
+        });
+        let due = due_reads(signatures.collect(), &state.known);
+        let read: Vec<_> = futures_util::stream::iter(due)
+            .map(|(id, open)| async move {
+                // A read the header or the Office made seconds ago may predate the change the
+                // signature shows: kept with it, it would stand until `OVERVIEW_FULL`.
+                forget_status(&id);
+                let prs = cached_status(daemon, &id).await;
+                (id, open, prs)
+            })
+            .buffer_unordered(OVERVIEW_READS)
+            .collect()
+            .await;
+        for (id, open, prs) in read {
+            match prs {
+                Ok(prs) => {
+                    let open = open.unwrap_or_default();
+                    let at = Instant::now();
+                    state.known.insert(id, Known { prs, open, at });
+                }
+                Err(error) => {
+                    tracing::warn!(%error, workspace = %id, "could not read the workspace's pull requests")
+                }
+            }
+        }
+        state.known.retain(|id, _| worktrees.contains_key(id));
+        state.at = Some(Instant::now());
+    }
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let known = state.known.get(&row.id)?;
+            Some(WorkspacePrs {
+                workspace: row.id.clone(),
+                prs: known.prs.clone(),
+            })
+        })
+        .collect())
+}
+
+/// The workspaces to read this round, with their open PRs' signature (none when a listing
+/// failed): every one never read or whose open PRs changed and, of those past `OVERVIEW_FULL`,
+/// only the `OVERVIEW_AGED` oldest. Workspaces first read in the same round would otherwise all be
+/// read again together every five minutes.
+fn due_reads(
+    signatures: Vec<(String, Option<String>)>,
+    known: &HashMap<String, Known>,
+) -> Vec<(String, Option<String>)> {
+    let mut due = Vec::new();
+    let mut aged = Vec::new();
+    for (id, open) in signatures {
+        match known.get(&id) {
+            None => due.push((id, open)),
+            Some(known) if open.as_ref().is_some_and(|open| *open != known.open) => {
+                due.push((id, open))
+            }
+            // A failed listing tells nothing: what was read stands until its time is up.
+            Some(known) if known.at.elapsed() >= OVERVIEW_FULL => aged.push((known.at, id, open)),
+            Some(_) => {}
+        }
+    }
+    aged.sort_by_key(|(at, ..)| *at);
+    due.extend(
+        aged.into_iter()
+            .take(OVERVIEW_AGED)
+            .map(|(_, id, open)| (id, open)),
+    );
+    due
+}
+
+/// The open PRs of `listings` (each clone's, as `gh pr list` gives them) that are the workspace's:
+/// on one of its branches, or a PR it was last read with; none when a clone's listing failed.
+/// Any change in them (a PR opened, merged or closed, its checks, review or conflicts) changes it.
+fn open_signature(
+    worktrees: &[WorktreeRow],
+    known: Option<&Known>,
+    listings: &HashMap<String, Option<Vec<Value>>>,
+) -> Option<String> {
+    let mut ours = Vec::new();
+    for worktree in worktrees {
+        let listed = listings.get(&worktree.clone_path)?.as_ref()?;
+        let numbers: Vec<u64> = known
+            .map(|known| {
+                known
+                    .prs
+                    .iter()
+                    .filter(|pr| pr.repo == worktree.repo)
+                    .filter_map(|pr| pr.number)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for pr in listed {
+            let on_branch = pr["headRefName"].as_str() == Some(worktree.branch.as_str())
+                && pr["isCrossRepository"].as_bool() != Some(true);
+            let read_with = pr["number"].as_u64().is_some_and(|n| numbers.contains(&n));
+            if on_branch || read_with {
+                ours.push(format!("{}:{pr}", worktree.repo));
+            }
+        }
+    }
+    ours.sort();
+    ours.dedup();
+    Some(ours.join("\n"))
 }
 
 pub async fn status(daemon: &Arc<Daemon>, workspace: &str) -> Result<Vec<PrInfo>> {
@@ -300,6 +476,21 @@ fn is_object_id(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Every open PR of the clone's repo, as `pr_list` gives them; `None` when the forge's CLI fails.
+/// A GitLab's carry no pipeline: a pipeline's end shows at the next full read.
+async fn open_prs(forge: Forge, env: &ShellEnv, clone: &Path) -> Option<Vec<Value>> {
+    match forge {
+        Forge::Github => {
+            let fields = format!("{STATUS_FIELDS},{IDENTITY_FIELDS}");
+            let args = [
+                "pr", "list", "--state", "open", "--limit", "200", "--json", &fields,
+            ];
+            gh_json(env, clone, &args).await
+        }
+        Forge::Gitlab => crate::mrs::open(env, clone).await,
+    }
+}
+
 /// The PRs from the branch `head`: `gh pr list`, or a GitLab's merge requests in the same shape;
 /// `None` when the forge's CLI fails.
 async fn pr_list(
@@ -324,10 +515,16 @@ async fn gh_pr_list(
     state: &str,
     fields: &str,
 ) -> Option<Vec<Value>> {
+    let args = [
+        "pr", "list", "--head", head, "--state", state, "--limit", "10", "--json", fields,
+    ];
+    gh_json(env, clone, &args).await
+}
+
+/// A `gh` call in `clone` whose answer is a JSON array; none when it fails.
+async fn gh_json(env: &ShellEnv, clone: &Path, args: &[&str]) -> Option<Vec<Value>> {
     let output = tokio::process::Command::new("gh")
-        .args([
-            "pr", "list", "--head", head, "--state", state, "--limit", "10", "--json", fields,
-        ])
+        .args(args)
         .current_dir(clone)
         .env_clear()
         .envs(env.vars())
@@ -856,6 +1053,115 @@ mod tests {
             can_merge: None,
             merge_blocker: None,
         }
+    }
+
+    fn worktree(repo: &str, branch: &str) -> WorktreeRow {
+        WorktreeRow {
+            id: format!("{repo}-wt"),
+            workspace_id: "ws".into(),
+            repo: repo.into(),
+            clone_path: format!("/clones/{repo}"),
+            path: format!("/ws/{repo}"),
+            branch: branch.into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            origin: WorktreeOrigin::Workspace,
+            group: None,
+            removed: false,
+            snapshot_ref: None,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_workspace_is_read_again_only_when_its_open_prs_change() {
+        let worktrees = [worktree("web", "jc/facets")];
+        let listing =
+            |prs: Value| HashMap::from([("/clones/web".to_string(), prs.as_array().cloned())]);
+        let open = |number: u64, head: &str, checks: &str| {
+            json!({"number": number, "headRefName": head, "isCrossRepository": false,
+                   "statusCheckRollup": [{"conclusion": checks}]})
+        };
+        let signature = |prs: Value, known: Option<&Known>| {
+            open_signature(&worktrees, known, &listing(prs)).expect("the clone was listed")
+        };
+
+        let running = signature(
+            json!([open(7, "jc/facets", "PENDING"), open(8, "other", "SUCCESS")]),
+            None,
+        );
+        assert_eq!(
+            running,
+            signature(
+                json!([open(7, "jc/facets", "PENDING"), open(8, "other", "FAILURE")]),
+                None
+            ),
+            "another branch's PR changes nothing"
+        );
+        assert_ne!(
+            running,
+            signature(json!([open(7, "jc/facets", "SUCCESS")]), None),
+            "its checks changed"
+        );
+        assert_ne!(
+            running,
+            signature(json!([]), None),
+            "it was merged or closed"
+        );
+        assert_ne!(
+            signature(json!([]), None),
+            signature(json!([open(9, "jc/facets", "PENDING")]), None),
+            "one was opened"
+        );
+
+        // A PR found under the name the branch was pushed under is followed by its number.
+        let mut found = pr("web", "OPEN");
+        found.number = Some(12);
+        let known = Known {
+            prs: vec![found],
+            open: String::new(),
+            at: Instant::now(),
+        };
+        assert_ne!(
+            signature(json!([open(12, "facets", "PENDING")]), Some(&known)),
+            signature(json!([open(12, "facets", "SUCCESS")]), Some(&known))
+        );
+
+        let failed = HashMap::from([("/clones/web".to_string(), None)]);
+        assert!(
+            open_signature(&worktrees, None, &failed).is_none(),
+            "a failed listing tells nothing"
+        );
+    }
+
+    #[test]
+    fn workspaces_read_together_are_read_again_a_few_at_a_time() {
+        let ago = |seconds: u64| Instant::now() - Duration::from_secs(seconds);
+        let known = |open: &str, at: Instant| Known {
+            prs: Vec::new(),
+            open: open.into(),
+            at,
+        };
+        let mut read = HashMap::new();
+        for (id, seconds) in [("a", 400), ("b", 360), ("c", 330), ("d", 320), ("e", 310)] {
+            read.insert(id.to_string(), known("same", ago(seconds)));
+        }
+        read.insert("fresh".to_string(), known("same", ago(5)));
+        read.insert("changed".to_string(), known("before", ago(5)));
+        read.insert("unlisted".to_string(), known("same", ago(5)));
+        let signatures = ["a", "b", "c", "d", "e", "fresh", "changed", "new"]
+            .map(|id| {
+                let open = if id == "changed" { "after" } else { "same" };
+                (id.to_string(), Some(open.to_string()))
+            })
+            .into_iter()
+            .chain([("unlisted".to_string(), None)])
+            .collect();
+        let due: Vec<String> = due_reads(signatures, &read)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(due, ["changed", "new", "a", "b", "c"]);
     }
 
     #[test]

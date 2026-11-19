@@ -1143,6 +1143,13 @@ methods! {
         #[access(Any, office)]
         #[relay(Read)]
         PrStatus(WorkspaceParams) -> PrStatusResult,
+        /// Every ready workspace's pull requests, for the sidebar: the open PRs of each repo are
+        /// listed once, and a workspace is read again only when one of its PRs changed, opened,
+        /// merged or closed, or after a few minutes.
+        #[serde(rename = "pr.overview")]
+        #[access(User)]
+        #[relay(Read)]
+        PrOverview(EmptyParams) -> PrOverviewResult,
         #[serde(rename = "pr.create")]
         #[access(Any)]
         #[relay(Act)]
@@ -3609,6 +3616,20 @@ pub struct PrStatusResult {
 
 #[derive(Serialize, Deserialize, TS, Clone, Debug)]
 #[ts(export)]
+pub struct PrOverviewResult {
+    /// The ready workspaces whose PRs were read.
+    pub workspaces: Vec<WorkspacePrs>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[ts(export)]
+pub struct WorkspacePrs {
+    pub workspace: String,
+    pub prs: Vec<PrInfo>,
+}
+
+#[derive(Serialize, Deserialize, TS, Clone, Debug)]
+#[ts(export)]
 pub struct ShippedParams {
     /// RFC 3339: the oldest merge to give.
     pub since: String,
@@ -4022,6 +4043,9 @@ pub struct Appearance {
     /// is light: the interface is dark only.
     #[serde(default)]
     pub theme_interface: bool,
+    /// The sidebar shows each workspace's pull request status beside its activity (off unless
+    /// `sidebar_pr_status = true`).
+    pub sidebar_pr_status: bool,
     /// The theme's colours, read now: the terminal's, and the code's from its 16 ANSI colours.
     pub palette: Option<Palette>,
     /// Why `terminal_theme` gives no palette.
@@ -4236,6 +4260,8 @@ pub struct AppearanceUpdate {
     pub terminal_theme: Option<String>,
     #[serde(default)]
     pub theme_interface: Option<bool>,
+    #[serde(default)]
+    pub sidebar_pr_status: Option<bool>,
 }
 
 /// Compaction of Claude and Codex chats through Jev (TypeSafe), off until the user turns it on.

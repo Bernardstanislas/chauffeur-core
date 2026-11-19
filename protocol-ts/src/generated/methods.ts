@@ -242,6 +242,7 @@ import type { PinWorkspaceParams } from "./PinWorkspaceParams";
 import type { PingParams } from "./PingParams";
 import type { PingResult } from "./PingResult";
 import type { PowerState } from "./PowerState";
+import type { PrOverviewResult } from "./PrOverviewResult";
 import type { PrStatusResult } from "./PrStatusResult";
 import type { Previews } from "./Previews";
 import type { ProcessInfo } from "./ProcessInfo";
@@ -383,7 +384,7 @@ import type { WorktreeCreateParams } from "./WorktreeCreateParams";
 import type { WorktreeCreateResult } from "./WorktreeCreateResult";
 import type { WorktreeRemoveParams } from "./WorktreeRemoveParams";
 
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 export const MIN_PROTOCOL_VERSION = 1;
 export const PEER_PROTOCOL_VERSION = 4;
 
@@ -611,6 +612,7 @@ export type ClientMethods = {
   "terminal.rename": [RenameTerminalParams, TerminalInfo];
   "terminal.cwd": [TerminalParams, TerminalCwdResult];
   "pr.status": [WorkspaceParams, PrStatusResult];
+  "pr.overview": [EmptyParams, PrOverviewResult];
   "pr.create": [CreatePrParams, ChatInfo];
   "pr.merge": [MergePrsParams, MergePrsResult];
   "pr.shipped": [ShippedParams, ShippedResult];
@@ -1016,6 +1018,7 @@ export const METHOD_NAMES = [
   "terminal.rename",
   "terminal.cwd",
   "pr.status",
+  "pr.overview",
   "pr.create",
   "pr.merge",
   "pr.shipped",

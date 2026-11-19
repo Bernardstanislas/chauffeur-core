@@ -81,6 +81,7 @@ pub async fn get(d: &Arc<Daemon>) -> Result<AppSettings> {
             terminal_size: settings.appearance.terminal_size,
             terminal_theme: settings.appearance.terminal_theme.clone(),
             theme_interface: settings.appearance.theme_interface,
+            sidebar_pr_status: settings.appearance.sidebar_pr_status,
             palette,
             palette_error,
         },
@@ -452,6 +453,9 @@ const TEMPLATE: &str = r#"# Chauffeur's settings. The app's Settings (⌘,) chan
 # The interface too (background, panels, text, accent; a light theme is ignored, the interface is
 # dark only):
 # theme_interface = true
+# Each workspace's pull requests in the sidebar (checks, review, merged), read from GitHub every
+# 30 seconds while the app is open:
+# sidebar_pr_status = true
 
 # The sound played when a chat finishes or needs you while the app is not in front: one of the
 # app's own ("chime", "bell", "station"), or an audio file of yours (MP3, WAV, AIFF, M4A, OGG,
@@ -790,7 +794,11 @@ fn set_appearance(d: &Daemon, update: AppearanceUpdate) -> Result<()> {
     .into_iter()
     .filter_map(|(key, value)| value.map(|v| font_size(v).map(|v| (key, v))))
     .collect::<Result<Vec<_>>>()?;
-    if fonts.is_empty() && sizes.is_empty() && update.theme_interface.is_none() {
+    if fonts.is_empty()
+        && sizes.is_empty()
+        && update.theme_interface.is_none()
+        && update.sidebar_pr_status.is_none()
+    {
         return Ok(());
     }
     d.settings
@@ -819,6 +827,15 @@ fn set_appearance(d: &Daemon, update: AppearanceUpdate) -> Result<()> {
                     table
                         .as_table_like_mut()
                         .map(|t| t.remove("theme_interface"));
+                }
+                None => {}
+            }
+            match update.sidebar_pr_status {
+                Some(true) => table["sidebar_pr_status"] = toml_edit::value(true),
+                Some(false) => {
+                    table
+                        .as_table_like_mut()
+                        .map(|t| t.remove("sidebar_pr_status"));
                 }
                 None => {}
             }

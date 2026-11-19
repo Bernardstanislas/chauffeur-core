@@ -8,8 +8,8 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { effectiveLoadout, type ModelChoice } from "@/lib/models";
 import { GithubSetup } from "./GithubSetup";
 import { GitlabSetup } from "./GitlabSetup";
-import { forgeName } from "@/lib/forge";
-import { refreshGitlab } from "@/state/gitlab";
+import { forgeName, forgeWords } from "@/lib/forge";
+import { refreshGitlab, useForge } from "@/state/gitlab";
 import { LocalModelsSettings } from "./LocalModelsSettings";
 import { TransferSettings } from "./TransferSettings";
 import { WorkerSettings } from "./WorkerSettings";
@@ -938,6 +938,7 @@ function Compaction({ settings, update, busy }: SectionProps) {
 /** Fonts of the interface, the code and the terminal, applied as they are saved. */
 function AppearanceSection({ settings, update, busy }: SectionProps) {
   const a = settings.appearance;
+  const forge = forgeWords(useForge());
   return (
     <>
       <Heading title="Fonts">
@@ -989,6 +990,15 @@ function AppearanceSection({ settings, update, busy }: SectionProps) {
         disabled={busy || !a.terminal_theme}
         onChange={(on) => void update({ appearance: { theme_interface: on } })}
         testId="theme-interface"
+      />
+      <Heading title="Sidebar" />
+      <Switch
+        label={`Show ${forge.long} status in the sidebar`}
+        hint={`Each workspace's ${forge.long}s beside its activity: checks, review, merged. Read from ${forge.name} every 30 seconds while the window is shown; also sidebar_pr_status in the [appearance] table of settings.toml.`}
+        on={a.sidebar_pr_status}
+        disabled={busy}
+        onChange={(on) => void update({ appearance: { sidebar_pr_status: on } })}
+        testId="sidebar-pr-status"
       />
     </>
   );
