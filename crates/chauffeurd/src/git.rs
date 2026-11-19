@@ -185,14 +185,50 @@ impl Git {
 
     /// The remote's default branch (`origin/HEAD`), if known locally.
     pub async fn remote_default_branch(&self, clone: &Path) -> Option<String> {
+        self.remote_head(clone, "origin").await
+    }
+
+    /// The default branch of `remote` as the clone last fetched it (`refs/remotes/<remote>/HEAD`).
+    async fn remote_head(&self, clone: &Path, remote: &str) -> Option<String> {
         let head = self
             .run(
                 clone,
-                &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                &[
+                    "symbolic-ref",
+                    "--quiet",
+                    &format!("refs/remotes/{remote}/HEAD"),
+                ],
             )
             .await
             .ok()?;
-        head.strip_prefix("refs/remotes/origin/").map(String::from)
+        head.strip_prefix(&format!("refs/remotes/{remote}/"))
+            .map(String::from)
+    }
+
+    /// The default branch of the clone's base remote ([`Git::base_remote`]) when it is not
+    /// `origin` (a fork's parent): as last fetched, else as the remote says. `None` for a clone
+    /// whose base is `origin`, or when neither knows.
+    pub async fn parent_default_branch(&self, clone: &Path) -> Option<String> {
+        let remote = self.base_remote(clone).await;
+        if remote == "origin" {
+            return None;
+        }
+        if let Some(branch) = self.remote_head(clone, &remote).await {
+            return Some(branch);
+        }
+        let listing = self
+            .run_within(
+                clone,
+                &["ls-remote", "--symref", "--end-of-options", &remote, "HEAD"],
+                &[],
+                FETCH_TIMEOUT,
+            )
+            .await
+            .ok()?;
+        listing.lines().find_map(|line| {
+            let (head, name) = line.strip_prefix("ref: refs/heads/")?.split_once('\t')?;
+            (name == "HEAD").then(|| head.to_string())
+        })
     }
 
     /// Creates a worktree at `path`: on a new `branch` cut from `start`, or on the existing

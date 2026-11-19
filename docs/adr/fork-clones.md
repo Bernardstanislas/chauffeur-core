@@ -9,13 +9,15 @@ A user added their fork of a repo (`owner/name` outside the main organization). 
 
 ## Decision
 
-Asked by a user 2026-11-19.
+Asked by a user 2026-11-19, refined in the review of PR #87.
 
-- A repo's base branch is read from the remote `gh` takes the repo's PRs from, the one `remote.<name>.gh-resolved` marks `base` (a fork's parent after `gh repo clone`, or the remote `gh repo set-default` picked), else `origin`: workspaces and explorations are cut from it after fetching it, and the header's ahead count, the Diff tab and a routine's refresh count from it. Branches are still pushed to the remote they track, `origin` for a fork; a PR's branch being resumed is fetched from `origin`.
-- A worktree's PR may come from a fork when its head is on the GitHub repo the branch is pushed to (the remote it tracks, else `origin`, as configured): the PR a fork's clone opens to its parent. A fork's PR whose head is on any other repo, someone else's fork with a branch of the same name, is still never the branch's. The rest of story 28 stands (the pushed-under name, its checks, when in doubt none).
+- A repo's base branch is read from the remote `gh` takes the repo's PRs from, the one `remote.<name>.gh-resolved` marks `base` (a fork's parent after `gh repo clone`, or the remote `gh repo set-default` picked), else `origin`: workspaces and explorations are cut from it after fetching it, and the header's ahead count, the Diff tab and a routine's refresh count from it. For such a remote other than `origin`, the default branch is that remote's (as last fetched, else as it says), unless the settings name one. Branches are still pushed where git pushes them; a PR's branch being resumed is fetched from `origin`.
+- A worktree's PR is one whose head is where the branch is pushed, as git pushes it (`branch.<name>.pushRemote`, else `remote.pushDefault`, else the remote it tracks, else `origin`; at its push URL, else its URL, as configured): a PR from the repo itself only when the branch is pushed to that repo, a fork's PR only when the branch is pushed to that fork. So a fork's clone shows the PR it opened to the parent, never the parent's own PR from a branch of the same name, and nobody takes another fork's. The rest of story 28 stands (the pushed-under name, its checks, when in doubt none).
+- The sidebar reads a workspace again when any open PR on one of its branches changes, a fork's included; the full read decides whether it is the branch's.
 
 ## Consequences
 
-- One `git config` read per use of the base, and one more read of the push remote only when GitHub answers a fork's PR.
-- A clone without a remote marked `gh-resolved = base` behaves as before.
+- A few `git config` reads per PR lookup (the push remote, its URL, the base remote); one `ls-remote` when a fork's clone has never fetched its parent's HEAD.
+- A clone without a remote marked `gh-resolved = base` reads its base as before; its PRs are its own as before unless its branches are pushed elsewhere than `origin`.
+- Another fork's PR on a branch of the same name may make the sidebar read a workspace again for nothing.
 - The app still labels an exploration's checkout `origin/<branch>`.

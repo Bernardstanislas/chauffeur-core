@@ -212,8 +212,8 @@ fn open_signature(
             })
             .unwrap_or_default();
         for pr in listed {
-            let on_branch = pr["headRefName"].as_str() == Some(worktree.branch.as_str())
-                && pr["isCrossRepository"].as_bool() != Some(true);
+            // A fork's PR too, whosever: the full read tells whether it is the branch's.
+            let on_branch = pr["headRefName"].as_str() == Some(worktree.branch.as_str());
             let read_with = pr["number"].as_u64().is_some_and(|n| numbers.contains(&n));
             if on_branch || read_with {
                 ours.push(format!("{}:{pr}", worktree.repo));
@@ -424,14 +424,9 @@ pub(crate) async fn find_pr_checked(
     let prs = pr_list(forge, env, clone, branch, state, &fields)
         .await
         .ok_or(())?;
-    // Asked of git only when GitHub has a fork's PR to tell apart.
-    let pushed_to = match prs.iter().any(is_cross_repository) {
-        true => pushed_repo(git, clone, branch).await,
-        false => None,
-    };
+    let push = push_target(git, clone, branch).await;
     if let Some(pr) = prs.into_iter().find(|pr| {
-        (pr["isCrossRepository"].as_bool() != Some(true) || head_is_ours(pr, pushed_to.as_ref()))
-            && pr["headRefName"].as_str().is_none_or(|head| head == branch)
+        head_is_ours(pr, &push) && pr["headRefName"].as_str().is_none_or(|head| head == branch)
     }) {
         return Ok(Some((pr, Found::LocalName)));
     }
@@ -441,15 +436,12 @@ pub(crate) async fn find_pr_checked(
     let prs = pr_list(forge, env, clone, &name, state, &fields)
         .await
         .ok_or(())?;
-    let pushed_to = match prs.iter().any(is_cross_repository) {
-        true => pushed_repo(git, clone, branch).await,
-        false => None,
-    };
     let local = format!("refs/heads/{branch}");
     let mut ours = Vec::new();
     for pr in prs {
         if pr["headRefName"].as_str() != Some(name.as_str())
-            || !head_is_ours(&pr, pushed_to.as_ref())
+            || pr["isCrossRepository"].is_null()
+            || !head_is_ours(&pr, &push)
         {
             continue;
         }
@@ -468,17 +460,23 @@ pub(crate) async fn find_pr_checked(
     Ok(only_one(ours).map(|pr| (pr, Found::Upstream)))
 }
 
-fn is_cross_repository(pr: &Value) -> bool {
-    pr["isCrossRepository"].as_bool() == Some(true)
+/// Where a worktree's branch is pushed: whether to the remote the clone's PRs are read from (the
+/// repo itself), and which GitHub repo that is, when it is one.
+#[derive(Debug, Default, PartialEq)]
+struct PushTarget {
+    to_base: bool,
+    repo: Option<(String, String)>,
 }
 
-/// Whether a PR's head is on a repo the branch is pushed to: the PR's repo itself, or the fork
-/// `pushed_to` (`owner`, `name`) the branch is pushed to, when the clone is a fork's and its PRs
-/// go to the parent. Another fork's branch of the same name is someone else's.
-fn head_is_ours(pr: &Value, pushed_to: Option<&(String, String)>) -> bool {
+/// Whether a PR's head is where the branch is pushed: a PR from the repo itself when the branch
+/// is pushed to it, a fork's when the branch is pushed to that fork (a fork's clone, its PRs
+/// going to the parent). A fork's clone never takes the parent's own PR from a branch of the
+/// same name, nor anyone takes another fork's. A PR GitHub says nothing of forks for is the
+/// repo's.
+fn head_is_ours(pr: &Value, push: &PushTarget) -> bool {
     match pr["isCrossRepository"].as_bool() {
-        Some(false) => true,
-        Some(true) => pushed_to.is_some_and(|(owner, name)| {
+        Some(false) | None => push.to_base,
+        Some(true) => push.repo.as_ref().is_some_and(|(owner, name)| {
             pr["headRepositoryOwner"]["login"]
                 .as_str()
                 .is_some_and(|o| o.eq_ignore_ascii_case(owner))
@@ -486,27 +484,51 @@ fn head_is_ours(pr: &Value, pushed_to: Option<&(String, String)>) -> bool {
                     .as_str()
                     .is_some_and(|n| n.eq_ignore_ascii_case(name))
         }),
-        None => false,
     }
 }
 
-/// The GitHub repo (`owner`, `name`) a local branch is pushed to: that of the remote it tracks,
-/// else of `origin`, as configured (not as rewritten by `insteadOf`).
-async fn pushed_repo(git: &Git, clone: &Path, branch: &str) -> Option<(String, String)> {
-    let remote = git
-        .run(
-            clone,
-            &["config", "--get", &format!("branch.{branch}.remote")],
-        )
+/// [`PushTarget`] of a local branch, as git pushes it: to `branch.<name>.pushRemote`, else
+/// `remote.pushDefault`, else the remote it tracks, else `origin`; at that remote's push URL,
+/// else its URL, as configured (not as rewritten by `insteadOf`).
+async fn push_target(git: &Git, clone: &Path, branch: &str) -> PushTarget {
+    let config = |key: String| async move {
+        git.run(clone, &["config", "--get", &key])
+            .await
+            .ok()
+            .filter(|value| !value.is_empty())
+    };
+    let is_remote = |name: &String| name != "." && !name.starts_with('-');
+    let mut remote = None;
+    for key in [
+        format!("branch.{branch}.pushRemote"),
+        "remote.pushDefault".to_string(),
+        format!("branch.{branch}.remote"),
+    ] {
+        if let Some(name) = config(key).await.filter(is_remote) {
+            remote = Some(name);
+            break;
+        }
+    }
+    let remote = remote.unwrap_or_else(|| "origin".to_string());
+    let url = match config(format!("remote.{remote}.pushurl")).await {
+        Some(url) => Some(url),
+        None => config(format!("remote.{remote}.url")).await,
+    };
+    let repo = url.as_deref().and_then(crate::github::github_repo);
+    let base = git.base_remote(clone).await;
+    let base_repo = config(format!("remote.{base}.url"))
         .await
-        .ok()
-        .filter(|remote| !remote.is_empty() && remote != "." && !remote.starts_with('-'))
-        .unwrap_or_else(|| "origin".to_string());
-    let url = git
-        .run(clone, &["config", "--get", &format!("remote.{remote}.url")])
-        .await
-        .ok()?;
-    crate::github::github_repo(&url)
+        .as_deref()
+        .and_then(crate::github::github_repo);
+    let same_repo = |(a, b): &(String, String), (c, d): &(String, String)| {
+        a.eq_ignore_ascii_case(c) && b.eq_ignore_ascii_case(d)
+    };
+    let to_base = remote == base
+        || repo
+            .as_ref()
+            .zip(base_repo.as_ref())
+            .is_some_and(|(r, b)| same_repo(r, b));
+    PushTarget { to_base, repo }
 }
 
 /// One PR of several found through the pushed-under name: the only one, else the only open one
@@ -1164,6 +1186,13 @@ mod tests {
             signature(json!([open(9, "jc/facets", "PENDING")]), None),
             "one was opened"
         );
+        let mut from_fork = open(10, "jc/facets", "PENDING");
+        from_fork["isCrossRepository"] = json!(true);
+        assert_ne!(
+            signature(json!([]), None),
+            signature(json!([from_fork]), None),
+            "one was opened from a fork, maybe the branch's own"
+        );
 
         // A PR found under the name the branch was pushed under is followed by its number.
         let mut found = pr("web", "OPEN");
@@ -1410,34 +1439,38 @@ refs/heads/local-only\0.\0refs/heads/main";
     }
 
     #[test]
-    fn a_fork_s_pr_is_ours_only_from_the_fork_the_branch_is_pushed_to() {
-        let pr = |cross: Value, owner: &str, name: &str| {
+    fn a_pr_is_ours_only_from_where_the_branch_is_pushed() {
+        let pr = |cross: bool, owner: &str, name: &str| {
             json!({
                 "isCrossRepository": cross,
                 "headRepositoryOwner": {"login": owner},
                 "headRepository": {"name": name},
             })
         };
-        let fork = ("Stan".to_string(), "chauffeur-core".to_string());
-        assert!(head_is_ours(&pr(json!(false), "acme", "web"), None));
-        assert!(head_is_ours(
-            &pr(json!(true), "stan", "Chauffeur-Core"),
-            Some(&fork)
-        ));
-        assert!(!head_is_ours(
-            &pr(json!(true), "someone", "chauffeur-core"),
-            Some(&fork)
-        ));
-        assert!(!head_is_ours(
-            &pr(json!(true), "stan", "other"),
-            Some(&fork)
-        ));
-        // Pushed to no GitHub repo we can name, or GitHub saying nothing of forks: not ours.
-        assert!(!head_is_ours(
-            &pr(json!(true), "stan", "chauffeur-core"),
-            None
-        ));
-        assert!(!head_is_ours(&json!({}), Some(&fork)));
+        let parent = pr(false, "acme", "chauffeur-core");
+        let fork_pr = pr(true, "stan", "Chauffeur-Core");
+        // A clone of the repo itself, pushing to it: its own PRs, no fork's.
+        let own = PushTarget {
+            to_base: true,
+            repo: Some(("acme".into(), "chauffeur-core".into())),
+        };
+        assert!(head_is_ours(&parent, &own));
+        assert!(!head_is_ours(&fork_pr, &own));
+        // A fork's clone, pushing to the fork: the fork's PR, never the parent's own one from a
+        // branch of the same name, nor another fork's.
+        let fork = PushTarget {
+            to_base: false,
+            repo: Some(("Stan".into(), "chauffeur-core".into())),
+        };
+        assert!(head_is_ours(&fork_pr, &fork));
+        assert!(!head_is_ours(&parent, &fork));
+        assert!(!head_is_ours(&pr(true, "someone", "chauffeur-core"), &fork));
+        assert!(!head_is_ours(&pr(true, "stan", "other"), &fork));
+        // Pushed to no GitHub repo we can name: no fork's PR. GitHub saying nothing of forks: the
+        // repo's own.
+        assert!(!head_is_ours(&fork_pr, &PushTarget::default()));
+        assert!(head_is_ours(&json!({}), &own));
+        assert!(!head_is_ours(&json!({}), &fork));
     }
 
     #[test]
