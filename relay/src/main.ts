@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { apnsSender } from "./apns";
 import { fcmSender } from "./fcm";
 import { mistralSessions } from "./mistral";
+import { googleMobileAccess } from "./mobile-access";
 import { startRelay } from "./server";
 
 const adminToken = process.env.RELAY_ADMIN_TOKEN;
@@ -59,11 +60,24 @@ const apns = appleFields.every(Boolean)
       sandbox: process.env.APNS_ENVIRONMENT === "sandbox",
     })
   : undefined;
+const mobileAudience = process.env.MOBILE_GOOGLE_CLIENT_ID;
+const mobileWorkspace = process.env.MOBILE_GOOGLE_WORKSPACE;
+const mobileInvitations = process.env.MOBILE_INVITED_EMAILS;
+const googleRequired = process.env.MOBILE_REQUIRE_GOOGLE;
+if (googleRequired !== undefined && googleRequired !== "true" && googleRequired !== "false")
+  throw new Error("Set MOBILE_REQUIRE_GOOGLE to true or false.");
+const requireGoogle = googleRequired === "true";
+if ((mobileAudience || mobileWorkspace || mobileInvitations || requireGoogle) && (!mobileAudience || !mobileWorkspace))
+  throw new Error("Set MOBILE_GOOGLE_CLIENT_ID and MOBILE_GOOGLE_WORKSPACE together.");
 const relay = startRelay({
   adminToken,
   port,
   hostname: process.env.RELAY_HOST ?? "127.0.0.1",
   telemetry: log,
+  requireGoogle,
+  mobileAccess: mobileAudience && mobileWorkspace
+    ? googleMobileAccess(mobileAudience, mobileWorkspace.toLowerCase(), mobileInvitations?.split(",") ?? [])
+    : undefined,
   voice: process.env.MISTRAL_API_KEY ? mistralSessions(process.env.MISTRAL_API_KEY) : undefined,
   push:
     fcm || apns

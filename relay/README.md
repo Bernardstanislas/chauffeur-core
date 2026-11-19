@@ -255,6 +255,33 @@ The local health endpoint is authenticated with a fresh per-launch control token
 status RPCs expose only configuration/readiness/counts, never credentials. No
 private host configuration methods are allowed through the mobile bridge.
 
+### Invitation-only access on a hosted relay
+
+Roll out this relay version before distributing a Mac build with
+`[mobile] google_access = true`. The Google client ID must match the desktop
+app's `[office] google_client_id`. On the GCP relay VM, edit the root-owned
+`/etc/chauffeur-relay.env` with `sudoedit` and keep its mode at `0600`:
+
+```dotenv
+MOBILE_GOOGLE_CLIENT_ID=<desktop OAuth client ID>
+MOBILE_GOOGLE_WORKSPACE=askdialog.com
+MOBILE_INVITED_EMAILS=friend@gmail.com,another@other-workspace.example
+```
+
+Use exact Google Workspace or Gmail addresses and separate them with commas.
+Leave `MOBILE_INVITED_EMAILS` empty to admit only the configured Workspace.
+Restart with `sudo systemctl restart chauffeur-relay` and check that
+`https://<relay>/health` returns `ok`. The restart disconnects all active
+mobile sessions. Authorized Macs re-register their remembered devices
+automatically. A removed address can no longer register devices or generate
+pairing codes. UI sign-in and approval on the Mac remain required to pair a new
+phone. Existing operator clients can continue using the relay during rollout.
+After the Macs have upgraded, set `MOBILE_REQUIRE_GOOGLE=true` and restart the
+relay to require a Google grant for new pairing and device renewals. This stops
+older builds from registering with the shared operator credential. For the
+cloud smoke test in this mode, supply an authorized desktop Google ID token
+in `RELAY_GOOGLE_ID_TOKEN`.
+
 ```sh
 bun run build:host
 CHAUFFEUR_TEST_DAEMON="$PWD/../target/debug/chauffeurd" \
