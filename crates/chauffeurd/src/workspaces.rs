@@ -1912,7 +1912,14 @@ impl WorkspaceManager {
     }
 
     /// Fetches a clone's base `branch`; a failure is said, the local state used.
-    async fn fetch_base(&self, workspace: &str, clone: &Path, repo: &str, remote: &str, branch: &str) {
+    async fn fetch_base(
+        &self,
+        workspace: &str,
+        clone: &Path,
+        repo: &str,
+        remote: &str,
+        branch: &str,
+    ) {
         self.progress(workspace, format!("fetching {repo}"));
         match self.git().fetch(clone, remote, branch).await {
             Ok(_) => self.mark_fetched(clone),
@@ -3097,8 +3104,14 @@ impl WorkspaceManager {
                 let lock = d.repos.lock_for(clone);
                 let _guard = lock.lock().await;
                 let base_remote = git.base_remote(clone).await;
-                self.fetch_base(&row.id, clone, &worktree.repo, &base_remote, &worktree.base_branch)
-                    .await;
+                self.fetch_base(
+                    &row.id,
+                    clone,
+                    &worktree.repo,
+                    &base_remote,
+                    &worktree.base_branch,
+                )
+                .await;
                 let checkout = async {
                     let path = Path::new(&worktree.path);
                     if !worktree.removed {

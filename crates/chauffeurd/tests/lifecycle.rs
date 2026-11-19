@@ -5749,6 +5749,44 @@ esac"#,
     // One from another fork whose branch has that name is someone else's.
     answer_with(vec![pr(67, true, "someone", "repo-a")]).unwrap();
     assert_eq!(status().await.number, None);
+
+    let exploration = d
+        .workspaces
+        .create(CreateWorkspaceParams {
+            name: Some("fork-exploration".into()),
+            repos: vec!["repo-a".into()],
+            explore: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace;
+    let checkout = PathBuf::from(&exploration.path).join("repo-a");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), parent_tip);
+    d.workspaces
+        .archive(&exploration.slug, false)
+        .await
+        .unwrap();
+    eventually("the fork exploration to be archived", || {
+        d.workspaces.get(&exploration.id).unwrap().state == WorkspaceState::Archived
+    })
+    .await;
+    git(
+        &work,
+        &["commit", "-q", "--allow-empty", "-m", "new parent tip"],
+    );
+    git(&work, &["push", "-q", "origin", "main"]);
+    let restored = d.workspaces.restore(&exploration.slug).await.unwrap();
+    assert_eq!(
+        restored.state,
+        WorkspaceState::Ready,
+        "{:?}",
+        restored.last_error
+    );
+    assert_eq!(
+        git(&checkout, &["rev-parse", "HEAD"]),
+        git(&work, &["rev-parse", "HEAD"]),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
