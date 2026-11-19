@@ -5609,6 +5609,115 @@ async fn pr_number(d: &Arc<Daemon>, workspace: &str, repo: &str) -> Option<u64> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_fork_s_workspace_starts_from_the_parent_and_shows_its_pr_from_the_fork() {
+    use serde_json::json;
+    let f = fixture(47780);
+    let d = &f.daemon;
+    let clone = f.root.join("clones/repo-a");
+    let fork = f.root.join("origin/repo-a.git");
+    // The parent the fork came from, one commit ahead of the fork's main.
+    let parent = f.root.join("origin/parent-a.git");
+    let path = |p: &Path| p.to_str().unwrap().to_string();
+    git(
+        &f.root,
+        &["clone", "-q", "--bare", &path(&fork), &path(&parent)],
+    );
+    let work = f.root.join("parent-work");
+    git(&f.root, &["clone", "-q", &path(&parent), &path(&work)]);
+    std::fs::write(work.join("merged.txt"), "merged upstream").unwrap();
+    git(&work, &["add", "-A"]);
+    git(&work, &["commit", "-q", "-m", "merged upstream"]);
+    git(&work, &["push", "-q", "origin", "main"]);
+    let parent_tip = git(&work, &["rev-parse", "HEAD"]);
+    // The clone as `gh repo clone` leaves a fork's: origin the fork, named as on GitHub (reached
+    // here through `insteadOf`), upstream the parent, which gh reads the PRs from.
+    let fork_url = "https://github.com/tester/repo-a.git";
+    git(
+        &clone,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", path(&fork)),
+            fork_url,
+        ],
+    );
+    git(&clone, &["remote", "set-url", "origin", fork_url]);
+    git(&clone, &["remote", "add", "upstream", &path(&parent)]);
+    git(&clone, &["config", "remote.upstream.gh-resolved", "base"]);
+
+    let answer = f.root.join("gh-answer.json");
+    let bin = f.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    fake_tool(
+        &bin,
+        "gh",
+        &format!(
+            r#"case "$1 $2" in
+  "pr list") if [ -f {answer} ]; then cat {answer}; else echo '[]'; fi ;;
+  *) exit 1 ;;
+esac"#,
+            answer = answer.display()
+        ),
+    );
+    let mut vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    let with_bin = format!("{}:{}", bin.display(), vars["PATH"]);
+    vars.insert("PATH".into(), with_bin);
+    d.shell_env.set_vars(vars);
+
+    let ws = d
+        .workspaces
+        .create(CreateWorkspaceParams {
+            name: Some("forked".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .workspace;
+    let a = PathBuf::from(&ws.path).join("repo-a");
+    // Cut from the parent's main, not from the fork's, which lags behind.
+    assert_eq!(git(&a, &["rev-parse", "HEAD"]), parent_tip);
+    std::fs::write(a.join("change.txt"), "change").unwrap();
+    git(&a, &["add", "-A"]);
+    git(&a, &["commit", "-q", "-m", "change"]);
+    git(&a, &["push", "-q", "-u", "origin", "HEAD"]);
+    let tip = git(&a, &["rev-parse", "HEAD"]);
+
+    let pr = |owner: &str| {
+        json!([{
+            "number": 67,
+            "baseRefName": "main",
+            "url": "https://example.com/pull/67",
+            "state": "OPEN",
+            "title": "A change",
+            "isDraft": false,
+            "statusCheckRollup": [],
+            "reviewDecision": "",
+            "mergeable": "MERGEABLE",
+            "headRefName": "tester/forked",
+            "headRefOid": tip,
+            "isCrossRepository": true,
+            "headRepository": {"name": "repo-a"},
+            "headRepositoryOwner": {"login": owner},
+        }])
+    };
+    let status = || async {
+        chauffeurd::prs::status(d, &ws.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|pr| pr.repo == "repo-a")
+            .unwrap()
+    };
+    // The PR from the fork the branch is pushed to is the branch's; ahead counts from the
+    // parent's main.
+    std::fs::write(&answer, pr("tester").to_string()).unwrap();
+    let shown = status().await;
+    assert_eq!((shown.number, shown.ahead), (Some(67), 1));
+    // One from another fork whose branch has that name is someone else's.
+    std::fs::write(&answer, pr("someone").to_string()).unwrap();
+    assert_eq!(status().await.number, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_pr_is_found_under_the_name_a_branch_was_pushed_under_only_when_it_is_its_own() {
     use serde_json::{Value, json};
     let f = fixture(47600);
